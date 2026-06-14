@@ -5,15 +5,14 @@
 
 | Command | Action |
 | :--- | :--- |
-| **`s`** | **SSH into the server** (`ubuntu@fdserver`) |
+| **`s`** | **SSH into the saved server.** First run `s user@host` once per device to set it (e.g. `s tristan@myserver`); afterwards just `s`. Target is stored in `~/.config/dotfiles/server`. |
 | **`t`** | **Attach / Create Tmux session** (Run this right after `s`) |
 | **`pullfd`** | Full sync: `git pull`, submodules, `deps.sh`, and `make -j ...` |
-| **`makefd`** | Fast build: `make -j fddev fdctl solana firedancer-dev` |
-| **`branchfd <name>`**| Pull, checkout `tristan/tristan-carter/<name>`, and build |
-| **`devfd`** | Run `sudo fddev dev` with `config.toml` |
-| **`pktfd`** | Run `sudo fddev pktgen` with `config.toml` |
+| **`makefd`** | Fast build: `make -j fdctl solana firedancer-dev` |
+| **`branchfd <name>`**| Pull, checkout `tristan/tristanx86/<name>`, and build |
+| **`devfd`** | Run `sudo firedancer-dev dev` with `config.toml` |
+| **`pktfd`** | Run `sudo firedancer-dev pktgen` with `config.toml` |
 | **`confd`** | Open `config.toml` in Neovim |
-| **`exit`** | Leave current shell or detach from tmux session |
 
 ---
 
@@ -23,6 +22,7 @@
 | Command | Action |
 | :--- | :--- |
 | **`disable-ht`** | Turn off Hyperthreading via `/sys/devices/.../smt/control` |
+| **`memfd`** | Release reserved 2MB & 1GB hugepages on NUMA `node0` (sets `nr_hugepages` to 0) |
 | **`clockspeed <x>`** | Pin CPU frequency (e.g., `clockspeed 3.2` sets min/max to 3.2GHz) |
 | **`pstat`** | Run `perf stat` for cache misses, cycles, branches, etc. |
 | **`precord`** / **`preport`**| Run `perf record -g` for sampling / `perf report` to view |

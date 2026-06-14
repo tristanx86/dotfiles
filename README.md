@@ -14,4 +14,4 @@ Ensure `git` is installed before running the setup.
 Copy and paste this one-liner into your terminal to clone (or update) the repository and run the setup script automatically:
 
 ```bash
-git clone https://github.com/tristan-carter/dotfiles.git ~/dotfiles 2>/dev/null || (cd ~/dotfiles && git fetch && git reset --hard origin/main) && chmod +x ~/dotfiles/install.sh && ~/dotfiles/install.sh && exec zsh
+git clone https://github.com/tristanx86/dotfiles.git ~/dotfiles 2>/dev/null || (cd ~/dotfiles && git fetch && git reset --hard origin/main) && chmod +x ~/dotfiles/install.sh && ~/dotfiles/install.sh && exec zsh

@@ -30,10 +30,34 @@ if [[ "$OS" == "Darwin" ]]; then
 
     # Kitty Terminal Integration
     # 'kitten ssh' automatically propagates terminfo and clipboard capability
-    alias s="kitty +kitten ssh ubuntu@fdserver"
-    
+    #
+    # The SSH target is stored per-device in an untracked file so each machine
+    # can point 's' at a different server without editing the dotfiles.
+    #   s                connect to the saved server
+    #   s user@host      connect to user@host and save it as the new default
+    FD_SERVER_FILE="$HOME/.config/dotfiles/server"
+
+    function s() {
+        if [ -n "$1" ]; then
+            mkdir -p "$(dirname "$FD_SERVER_FILE")"
+            echo "$1" > "$FD_SERVER_FILE"
+        fi
+        if [ ! -s "$FD_SERVER_FILE" ]; then
+            echo "No server set. Usage: s user@host (saved for next time)"
+            return 1
+        fi
+        kitty +kitten ssh "$(cat "$FD_SERVER_FILE")"
+    }
+
     # Mosh Integration (Optional: requires 'brew install mosh')
-    alias m="kitty +kitten ssh --kitten=mosh"
+    # Uses the same saved server as 's'.
+    function m() {
+        if [ ! -s "$FD_SERVER_FILE" ]; then
+            echo "No server set. Run 's user@host' first to save one."
+            return 1
+        fi
+        kitty +kitten ssh --kitten=mosh "$(cat "$FD_SERVER_FILE")"
+    }
 
 # ── Linux Configuration (Dell/Razer) ─────────────────
 elif [[ "$OS" == "Linux" ]]; then
@@ -99,14 +123,20 @@ alias gd='git diff'
 alias t="tmux new-session -A -s main"
 
 # ── Firedancer Development ───────────────────────────
-alias makefd="make -j fddev fdctl solana firedancer-dev"
-alias pullfd="git pull && git submodule update && ./deps.sh && make -j fddev fdctl solana firedancer-dev"
-alias pktfd="sudo fddev pktgen --config ~/config.toml"
-alias devfd="sudo fddev dev --config ~/config.toml"
+alias makefd="make -j fdctl solana firedancer-dev"
+alias pullfd="git pull && git submodule update && ./deps.sh && make -j fdctl solana firedancer-dev"
+alias pktfd="sudo firedancer-dev pktgen --config ~/config.toml"
+alias devfd="sudo firedancer-dev dev --config ~/config.toml"
 alias confd="nvim ~/config.toml"
 
 # ── Hardware & Performance Tuning ────────────────────
 alias disable-ht="echo off | sudo tee /sys/devices/system/cpu/smt/control"
+
+# Release reserved hugepages (2MB and 1GB) on NUMA node0
+function memfd() {
+    echo 0 | sudo tee /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+    echo 0 | sudo tee /sys/devices/system/node/node0/hugepages/hugepages-1048576kB/nr_hugepages
+}
 
 function clockspeed() {
     if [ -z "$1" ]; then
@@ -123,8 +153,8 @@ function branchfd() {
         return 1
     fi
     git pull
-    git checkout -b "$1" "tristan/tristan-carter/$1" || { echo "Error: Branch checkout failed. Make sure the remote branch exists."; return 1; }
-    make -j fddev fdctl solana firedancer-dev
+    git checkout -b "$1" "tristan/tristanx86/$1" || { echo "Error: Branch checkout failed. Make sure the remote branch exists."; return 1; }
+    make -j fdctl solana firedancer-dev
 }
 
 # ── Prompt Configuration ─────────────────────────────
