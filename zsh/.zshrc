@@ -117,19 +117,41 @@ alias tn='tmux new -s'                  # tn <name>  — new session
 alias tk='tmux kill-session -t'         # tk <name>  — kill session
 function ta() { tmux attach ${1:+-t "$1"}; }   # ta [name] — attach (last if omitted)
 
-# fdwork: lay out a dev window in the CURRENT session — editor | build / htop.
+# fdwork: ultrawide dev window in the CURRENT session. Layout (left -> right):
+#   tree | editor | editor | editor | [ cmd / cmd / cmd / htop ]
+# A narrow file tree, three tall editors, then a right column of three short
+# stacked command panes plus htop. Run inside tmux (needs tmux >= 3.1 for %).
 function fdwork() {
     if [ -z "$TMUX" ]; then
         echo "fdwork must run inside tmux. Start a session first:  tn <name>   (or attach: ta)"
         return 1
     fi
-    local dir="$PWD" p0 p1 p2
-    p0=$(tmux new-window  -P -F '#{pane_id}' -n dev -c "$dir")
-    p1=$(tmux split-window -h -t "$p0" -P -F '#{pane_id}' -c "$dir")
-    p2=$(tmux split-window -v -t "$p1" -P -F '#{pane_id}' -c "$dir")
-    tmux send-keys -t "$p2" 'command -v htop >/dev/null && htop || top' C-m
-    tmux send-keys -t "$p0" 'nvim .' C-m
-    tmux select-pane -t "$p0"
+    local dir="$PWD"
+    local tree rest cmdcol code1 code2 code3 cmd1 cmd2 cmd3 htop
+    local mon='command -v htop >/dev/null && htop || top'
+
+    # Columns: tree (~12%) | code area (~58%) | command column (~30%).
+    tree=$(tmux new-window   -P -F '#{pane_id}' -n dev -c "$dir")
+    rest=$(tmux split-window -h -t "$tree" -l 88% -P -F '#{pane_id}' -c "$dir")
+    cmdcol=$(tmux split-window -h -t "$rest" -l 34% -P -F '#{pane_id}' -c "$dir")
+
+    # Code area -> three editor columns.
+    code1="$rest"
+    code2=$(tmux split-window -h -t "$code1" -l 66% -P -F '#{pane_id}' -c "$dir")
+    code3=$(tmux split-window -h -t "$code2" -l 50% -P -F '#{pane_id}' -c "$dir")
+
+    # Command column -> three short panes stacked above htop.
+    cmd1="$cmdcol"
+    cmd2=$(tmux split-window -v -t "$cmd1" -l 75% -P -F '#{pane_id}' -c "$dir")
+    cmd3=$(tmux split-window -v -t "$cmd2" -l 66% -P -F '#{pane_id}' -c "$dir")
+    htop=$(tmux split-window -v -t "$cmd3" -l 50% -P -F '#{pane_id}' -c "$dir")
+
+    tmux send-keys -t "$tree" 'nvim .' C-m     # nvim-tree file explorer
+    tmux send-keys -t "$code1" 'nvim' C-m
+    tmux send-keys -t "$code2" 'nvim' C-m
+    tmux send-keys -t "$code3" 'nvim' C-m
+    tmux send-keys -t "$htop" "$mon" C-m
+    tmux select-pane -t "$code1"
 }
 
 # dothelp: render the cheat sheet in a pager (resolves the repo via ~/.zshrc).
