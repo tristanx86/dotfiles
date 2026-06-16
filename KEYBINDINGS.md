@@ -7,6 +7,7 @@ Run `dothelp` to read this in the terminal.
 | Command | Action |
 | :--- | :--- |
 | `dothelp` | Show this cheat sheet. |
+| `dotupdate` | Pull the latest dotfiles, re-run `install.sh`, reload the shell. |
 | `s [user@host]` | SSH to the saved server. Pass `user@host` once to set it (stored in `~/.config/dotfiles/server`). |
 | `makefd` | `make -j firedancer-dev`. |
 | `pullfd` | `git pull`, submodules, `deps.sh`, then build. |

@@ -143,6 +143,11 @@ function dothelp() {
     else less -R "$doc"; fi
 }
 
+# dotupdate: pull the latest dotfiles, re-run install.sh, reload the shell.
+function dotupdate() {
+    git clone https://github.com/tristanx86/dotfiles.git ~/dotfiles 2>/dev/null || (cd ~/dotfiles && git fetch && git reset --hard origin/main) && chmod +x ~/dotfiles/install.sh && ~/dotfiles/install.sh && exec zsh
+}
+
 # ── Firedancer Development ───────────────────────────
 alias makefd="make -j firedancer-dev"
 alias pullfd="git pull && git submodule update && ./deps.sh && make -j firedancer-dev"
