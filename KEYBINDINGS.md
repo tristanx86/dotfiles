@@ -13,6 +13,8 @@ Run `dothelp` to read this in the terminal.
 | `pullfd` | `git pull`, submodules, `deps.sh`, then build. |
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
 | `devfd` / `pktfd` | Run `firedancer-dev dev` / `pktgen` with `~/config.toml`. |
+| `flamefd` | Capture a `perf` flamegraph (`firedancer-dev flame`). |
+| `metricsfd` | Print the validator's Prometheus metrics (`firedancer-dev metrics`). |
 | `confd` | Edit `~/config.toml`. |
 
 ## Performance
@@ -20,6 +22,7 @@ Run `dothelp` to read this in the terminal.
 | Command | Action |
 | :--- | :--- |
 | `htop` / `btop` | Preconfigured monitors: per-core meters, per-process core column, kernel threads shown, 0-based core IDs, CPU% sort. |
+| `topo` | CPU topology + NUMA layout (cores, HT siblings, isolated CPUs) for tile pinning. |
 | `disable-ht` | Disable hyperthreading. |
 | `memfd` | Release 2MB & 1GB hugepages on NUMA node0. |
 | `clockspeed <ghz>` | Pin min/max CPU frequency. |

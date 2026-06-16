@@ -172,10 +172,28 @@ alias makefd="make -j firedancer-dev"
 alias pullfd="git pull && git submodule update && ./deps.sh && make -j firedancer-dev"
 alias pktfd="sudo firedancer-dev pktgen --config ~/config.toml"
 alias devfd="sudo firedancer-dev dev --config ~/config.toml"
+alias flamefd="sudo firedancer-dev flame --config ~/config.toml"      # perf flamegraph
+alias metricsfd="sudo firedancer-dev metrics --config ~/config.toml"  # Prometheus metrics
 alias confd="nvim ~/config.toml"
 
 # ── Hardware & Performance Tuning ────────────────────
 alias disable-ht="echo off | sudo tee /sys/devices/system/cpu/smt/control"
+
+# topo: CPU topology + NUMA layout, for tile pinning decisions.
+function topo() {
+    echo "== Summary =="
+    lscpu | grep -E '^(Architecture|CPU\(s\)|Thread|Core|Socket|NUMA|Model name)'
+    echo
+    echo "== Per-CPU: CPU NODE SOCKET CORE ONLINE MAXMHZ (same CORE = HT siblings) =="
+    lscpu -e=CPU,NODE,SOCKET,CORE,ONLINE,MAXMHZ
+    echo
+    echo "Isolated CPUs: $(cat /sys/devices/system/cpu/isolated 2>/dev/null || echo '?')"
+    if command -v numactl >/dev/null; then
+        echo
+        echo "== NUMA =="
+        numactl -H
+    fi
+}
 
 # Release reserved hugepages (2MB and 1GB) on NUMA node0
 function memfd() {

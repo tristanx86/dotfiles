@@ -44,7 +44,7 @@ elif [[ "$OS" == "Linux" ]]; then
     sudo apt-get install -y build-essential git zsh curl wget unzip tar \
                         xclip nodejs npm ripgrep fd-find python3-venv \
                         cmake clang lldb lld cppcheck pkg-config libssl-dev \
-                        tmux gdb zoxide htop btop
+                        tmux gdb zoxide htop btop numactl
 
     # Install Rust if not present
     if ! command -v cargo &>/dev/null; then
