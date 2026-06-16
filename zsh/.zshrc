@@ -118,8 +118,8 @@ alias tk='tmux kill-session -t'         # tk <name>  — kill session
 function ta() { tmux attach ${1:+-t "$1"}; }   # ta [name] — attach (last if omitted)
 
 # fdwork: ultrawide dev window in the CURRENT session. Layout (left -> right):
-#   tree | editor | editor | editor | [ cmd / cmd / cmd / htop ]
-# A narrow file tree, three tall editors, then a right column of three short
+#   tree | term | term | term | [ cmd / cmd / cmd / htop ]
+# A narrow file tree, three tall terminals, then a right column of three short
 # stacked command panes plus htop. Run inside tmux (needs tmux >= 3.1 for %).
 function fdwork() {
     if [ -z "$TMUX" ]; then
@@ -130,9 +130,9 @@ function fdwork() {
     local tree rest cmdcol code1 code2 code3 cmd1 cmd2 cmd3 htop
     local mon='command -v htop >/dev/null && htop || top'
 
-    # Columns: tree (~12%) | code area (~58%) | command column (~30%).
+    # Columns: tree (~6%) | code area (~64%) | command column (~30%).
     tree=$(tmux new-window   -P -F '#{pane_id}' -n dev -c "$dir")
-    rest=$(tmux split-window -h -t "$tree" -l 88% -P -F '#{pane_id}' -c "$dir")
+    rest=$(tmux split-window -h -t "$tree" -l 94% -P -F '#{pane_id}' -c "$dir")
     cmdcol=$(tmux split-window -h -t "$rest" -l 34% -P -F '#{pane_id}' -c "$dir")
 
     # Code area -> three editor columns.
@@ -147,10 +147,7 @@ function fdwork() {
     htop=$(tmux split-window -v -t "$cmd3" -l 50% -P -F '#{pane_id}' -c "$dir")
 
     tmux send-keys -t "$tree" 'nvim .' C-m     # nvim-tree file explorer
-    tmux send-keys -t "$code1" 'nvim' C-m
-    tmux send-keys -t "$code2" 'nvim' C-m
-    tmux send-keys -t "$code3" 'nvim' C-m
-    tmux send-keys -t "$htop" "$mon" C-m
+    tmux send-keys -t "$htop" "$mon" C-m       # code columns stay as plain shells
     tmux select-pane -t "$code1"
 }
 
