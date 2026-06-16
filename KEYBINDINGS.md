@@ -1,21 +1,27 @@
 # Cheat Sheet
 
-Run `dothelp` to read this in the terminal.
+Run `helpdot` to read this in the terminal.
 
 ## Shell
 
 | Command | Action |
 | :--- | :--- |
-| `dothelp` | Show this cheat sheet. |
-| `dotupdate` | Pull the latest dotfiles, re-run `install.sh`, reload the shell. |
+| `helpdot` | Show this cheat sheet. |
+| `updatedot` | Pull the latest dotfiles, re-run `install.sh`, reload the shell. |
 | `s [user@host]` | SSH to the saved server. Pass `user@host` once to set it (stored in `~/.config/dotfiles/server`). |
-| `makefd` | `make -j firedancer-dev`. |
+| `switchfd [name]` | Pick the firedancer binary the `*fd` commands drive (`firedancer-dev`, `fddev`, `firedancer`, …). No arg shows the current one. |
+| `makefd` | Build the current binary's make target (`fddev` also builds `solana`). |
 | `pullfd` | `git pull`, submodules, `deps.sh`, then build. |
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
-| `devfd` / `pktfd` | Run `firedancer-dev dev` / `pktgen` with `~/config.toml`. |
-| `flamefd` | Capture a `perf` flamegraph (`firedancer-dev flame`). |
-| `metricsfd` | Print the validator's Prometheus metrics (`firedancer-dev metrics`). |
-| `confd` | Edit `~/config.toml`. |
+| `devfd` / `pktfd` | Run the current binary's `dev` / `pktgen` with `~/config.toml`. |
+| `flamefd` | Capture a `perf` flamegraph (current binary's `flame`). |
+| `metricsfd` | Print the validator's Prometheus metrics (current binary's `metrics`). |
+| `cfgfd` | Edit the active config file. |
+| `cfgfd new <name>` | Create a config (seeded from the active one) and switch to it. |
+| `cfgfd ls` | List config files; `*` marks the active one. |
+| `cfgfd use <name>` | Switch the active config (persisted across restarts). |
+| `cfgfd rm <name>` | Delete a config file. |
+| `cfgfd cur` | Print the active config's path. |
 
 ## Performance
 
@@ -23,8 +29,8 @@ Run `dothelp` to read this in the terminal.
 | :--- | :--- |
 | `htop` / `btop` | Preconfigured monitors: per-core meters, per-process core column, kernel threads shown, 0-based core IDs, CPU% sort. |
 | `topo` | CPU topology + NUMA layout (cores, HT siblings, isolated CPUs) for tile pinning. |
-| `disable-ht` | Disable hyperthreading. |
-| `memfd` | Release 2MB & 1GB hugepages on NUMA node0. |
+| `enable-ht` / `disable-ht` | Enable / disable hyperthreading. |
+| `relmemfd` | Release 2MB & 1GB hugepages on NUMA node0. |
 | `clockspeed <ghz>` | Pin min/max CPU frequency. |
 | `pstat` | `perf stat` — cache misses, cycles, branches. |
 
