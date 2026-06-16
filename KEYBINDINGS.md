@@ -16,6 +16,7 @@ Run `helpdot` to read this in the terminal.
 | `devfd` / `pktfd` | Run the current binary's `dev` / `pktgen` with `~/config.toml`. |
 | `flamefd` | Capture a `perf` flamegraph (current binary's `flame`). |
 | `metricsfd` | Print the validator's Prometheus metrics (current binary's `metrics`). |
+| `setuppktfd` | Set up mel0 for firedancer (route + static ARP), then optionally launch DPDK pktgen on mel1 → mel0 (cores 14 & 15). mlx5 loopback testing. |
 | `cfgfd` | Edit the active config file. |
 | `cfgfd new <name>` | Create a config (seeded from the active one) and switch to it. |
 | `cfgfd ls` | List config files; `*` marks the active one. |
