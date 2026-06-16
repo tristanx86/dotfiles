@@ -10,7 +10,9 @@ end
 vim.opt.rtp:prepend(lazypath)
 
 -- ── General Configuration ────────────────────────────────
-vim.g.mapleader = " "
+-- Leader = F1 (avoids any Shift / case issues from held letter keys)
+vim.g.mapleader = "<F1>"
+vim.g.maplocalleader = "<F1>"
 
 -- UI & Layout
 vim.opt.number = true
@@ -206,9 +208,9 @@ vim.keymap.set('n', '<leader>m', ':make<CR>', { desc = 'Run Make' })
 vim.keymap.set('n', '<leader>mr', ':make run<CR>', { desc = 'Make Run' })
 vim.keymap.set('n', '<leader>mc', ':make clean<CR>', { desc = 'Make Clean' })
 
-vim.keymap.set('n', '<leader>d', require("dap").continue, { desc = 'Debug: Start/Continue' })
-vim.keymap.set('n', '<leader>db', require("dap").toggle_breakpoint, { desc = 'Debug: Toggle Breakpoint' })
-vim.keymap.set('n', '<leader>du', require("dapui").toggle, { desc = 'Debug: Toggle UI' })
+vim.keymap.set('n', '<leader>d', function() require("dap").continue() end, { desc = 'Debug: Start/Continue' })
+vim.keymap.set('n', '<leader>db', function() require("dap").toggle_breakpoint() end, { desc = 'Debug: Toggle Breakpoint' })
+vim.keymap.set('n', '<leader>du', function() require("dapui").toggle() end, { desc = 'Debug: Toggle UI' })
 
 vim.keymap.set('n', '<leader>ff', function() require('telescope.builtin').find_files() end, { desc = 'Find Files' })
 vim.keymap.set('n', '<leader>fg', function() require('telescope.builtin').live_grep() end, { desc = 'Grep Files' })

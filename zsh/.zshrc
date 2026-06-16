@@ -61,8 +61,6 @@ if [[ "$OS" == "Darwin" ]]; then
 
 # ── Linux Configuration (Dell/Razer) ─────────────────
 elif [[ "$OS" == "Linux" ]]; then
-    export PATH="$HOME/.local/bin:$PATH"
-
     # Performance Analysis Tools (perf wrappers)
     # Basic cache miss and cycle analysis
     alias pstat="sudo perf stat -e cache-misses,cache-references,cycles,instructions,branches,branch-misses"
@@ -122,6 +120,24 @@ alias gd='git diff'
 # Attach to existing 'main' session or create new
 alias t="tmux new-session -A -s main"
 
+# 3-pane workspace in the current dir: editor | build shell / htop.
+# Re-run to re-attach (works inside or outside tmux).
+function fdwork() {
+    local session="fd"
+    if tmux has-session -t "$session" 2>/dev/null; then
+        if [ -n "$TMUX" ]; then tmux switch-client -t "$session"; else tmux attach -t "$session"; fi
+        return
+    fi
+    local dir="$PWD"
+    tmux new-session -d -s "$session" -c "$dir" -n dev
+    tmux split-window -h  -t "$session:dev"   -c "$dir"   # pane 1: right column
+    tmux split-window -v  -t "$session:dev.1" -c "$dir"   # pane 2: bottom-right
+    tmux send-keys -t "$session:dev.2" 'command -v htop >/dev/null && htop || top' C-m
+    tmux select-pane -t "$session:dev.0"
+    tmux send-keys -t "$session:dev.0" 'nvim .' C-m
+    if [ -n "$TMUX" ]; then tmux switch-client -t "$session"; else tmux attach -t "$session"; fi
+}
+
 # ── Firedancer Development ───────────────────────────
 alias makefd="make -j fdctl solana firedancer-dev"
 alias pullfd="git pull && git submodule update && ./deps.sh && make -j fdctl solana firedancer-dev"
@@ -164,3 +180,4 @@ function branchfd() {
 # Replaces 'z' plugin for faster, algorithm-based directory jumping.
 # Must be initialized at the end of the file.
 eval "$(zoxide init zsh)"
+export PATH="$HOME/.local/bin:$PATH"

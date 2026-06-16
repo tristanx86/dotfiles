@@ -30,7 +30,7 @@ if [[ "$OS" == "Darwin" ]]; then
     fi
 
     echo "[MacOS] Installing Core Utilities & Dev Tools..."
-    brew install git zsh wget node ripgrep fd neovim cmake llvm cppcheck rustup-init tmux gdb zoxide
+    brew install git zsh wget node ripgrep fd neovim cmake llvm cppcheck rustup-init tmux gdb zoxide htop btop
     brew install --cask kitty font-fira-code-nerd-font
 
 # -----------------------------------------------------------------------------
@@ -44,7 +44,7 @@ elif [[ "$OS" == "Linux" ]]; then
     sudo apt-get install -y build-essential git zsh curl wget unzip tar \
                         xclip nodejs npm ripgrep fd-find python3-venv \
                         cmake clang lldb lld cppcheck pkg-config libssl-dev \
-                        tmux gdb zoxide
+                        tmux gdb zoxide htop btop
 
     # Install Rust if not present
     if ! command -v cargo &>/dev/null; then
@@ -103,6 +103,12 @@ if [ ! -d "$P10K_DIR" ]; then
     git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$P10K_DIR"
 fi
 
+TPM_DIR="$HOME/.tmux/plugins/tpm"
+if [ ! -d "$TPM_DIR" ]; then
+    echo "[Tmux] Installing TPM (Tmux Plugin Manager)..."
+    git clone --depth=1 https://github.com/tmux-plugins/tpm "$TPM_DIR"
+fi
+
 create_symlink() {
     local src=$1
     local dest=$2
@@ -135,6 +141,84 @@ if [ -d "$HOME/.config/nvim" ] && [ ! -L "$HOME/.config/nvim" ]; then
     mv "$HOME/.config/nvim" "$HOME/.config/nvim.backup.$(date +%s)"
 fi
 create_symlink "$DOTFILES_DIR/nvim" "$HOME/.config/nvim"
+
+# Install tmux plugins now that .tmux.conf is linked.
+if [ -x "$HOME/.tmux/plugins/tpm/bin/install_plugins" ]; then
+    echo "[Tmux] Installing tmux plugins..."
+    "$HOME/.tmux/plugins/tpm/bin/install_plugins" || echo "[WARNING] tmux plugin install failed; run prefix+I inside tmux."
+fi
+
+# -----------------------------------------------------------------------------
+# htop / btop preconfiguration
+# -----------------------------------------------------------------------------
+# These tools rewrite their config on exit, so seed (copy) rather than symlink.
+echo "==== Seeding htop / btop configs ===="
+
+seed_config() {
+    local src="$1" dest="$2"
+    [ -f "$src" ] || return 0
+    mkdir -p "$(dirname "$dest")"
+    if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
+        mv "$dest" "${dest}.backup.$(date +%s)"
+        echo "[Backup] Saved existing $dest"
+    fi
+    cp "$src" "$dest"
+    echo "[Config] Seeded $dest"
+}
+
+if command -v btop &>/dev/null; then
+    seed_config "$DOTFILES_DIR/btop/btop.conf" "$HOME/.config/btop/btop.conf"
+fi
+
+# htop >= 3.2 uses named fields; older htop needs the legacy numeric format.
+if command -v htop &>/dev/null; then
+    HTOP_RC="$HOME/.config/htop/htoprc"
+    htver="$(htop --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+    if [ -n "$htver" ] && [ "$(printf '%s\n3.2.0\n' "$htver" | sort -V | head -1)" != "3.2.0" ]; then
+        echo "[htop] Detected htop $htver (< 3.2); writing legacy numeric-field config..."
+        mkdir -p "$(dirname "$HTOP_RC")"
+        [ -f "$HTOP_RC" ] && mv "$HTOP_RC" "${HTOP_RC}.backup.$(date +%s)"
+        cat > "$HTOP_RC" <<'HTOPRC'
+htop_version=3.0.5
+config_reader_min_version=2
+fields=0 48 17 18 38 39 2 46 47 37 50 1
+sort_key=46
+sort_direction=-1
+hide_kernel_threads=0
+hide_userland_threads=0
+shadow_other_users=0
+show_thread_names=1
+show_program_path=0
+highlight_base_name=1
+highlight_megabytes=1
+highlight_threads=1
+find_comm_in_cmdline=1
+strip_exe_from_cmdline=1
+show_merged_command=0
+tree_view=0
+header_margin=1
+detailed_cpu_time=0
+cpu_count_from_one=0
+show_cpu_usage=1
+show_cpu_frequency=1
+show_cpu_temperature=1
+update_process_names=0
+account_guest_in_cpu_meter=0
+color_scheme=0
+enable_mouse=1
+delay=15
+hide_function_bar=0
+header_layout=two_50_50
+column_meters_0=LeftCPUs2 Memory Swap
+column_meter_modes_0=1 1 1
+column_meters_1=RightCPUs2 Tasks LoadAverage Uptime
+column_meter_modes_1=1 2 2 2
+HTOPRC
+        echo "[Config] Seeded $HTOP_RC (legacy format)"
+    else
+        seed_config "$DOTFILES_DIR/htop/htoprc" "$HTOP_RC"
+    fi
+fi
 
 # -----------------------------------------------------------------------------
 # Finalization

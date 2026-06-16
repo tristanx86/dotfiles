@@ -1,67 +1,68 @@
-# Environment Cheat Sheet
+# Cheat Sheet
 
-## 1. Daily Firedancer Workflow
-*These commands are available instantly in your Zsh prompt.*
+## Starter keys — both are `F1`
 
-| Command | Action |
-| :--- | :--- |
-| **`s`** | **SSH into the saved server.** First run `s user@host` once per device to set it (e.g. `s tristan@myserver`); afterwards just `s`. Target is stored in `~/.config/dotfiles/server`. |
-| **`t`** | **Attach / Create Tmux session** (Run this right after `s`) |
-| **`pullfd`** | Full sync: `git pull`, submodules, `deps.sh`, and `make -j ...` |
-| **`makefd`** | Fast build: `make -j fdctl solana firedancer-dev` |
-| **`branchfd <name>`**| Pull, checkout `tristan/tristanx86/<name>`, and build |
-| **`devfd`** | Run `sudo firedancer-dev dev` with `config.toml` |
-| **`pktfd`** | Run `sudo firedancer-dev pktgen` with `config.toml` |
-| **`confd`** | Open `config.toml` in Neovim |
+Shortcuts are chords: tap the starter, release, then tap the action key (no holding).
 
----
+- **Prefix** (tmux) — starts tmux pane/window commands.
+- **Leader** (Neovim) — starts custom Neovim shortcuts.
 
-## 2. Hardware & Performance Tuning
-*System-level commands for profiling and bare-metal testing.*
+Both map to `F1`, so `Prefix h` means `F1` then `h`, and `Leader ff` means `F1` then `f` `f`. F1 is a real key, so this works on any keyboard.
+
+## Shell
 
 | Command | Action |
 | :--- | :--- |
-| **`disable-ht`** | Turn off Hyperthreading via `/sys/devices/.../smt/control` |
-| **`memfd`** | Release reserved 2MB & 1GB hugepages on NUMA `node0` (sets `nr_hugepages` to 0) |
-| **`clockspeed <x>`** | Pin CPU frequency (e.g., `clockspeed 3.2` sets min/max to 3.2GHz) |
-| **`pstat`** | Run `perf stat` for cache misses, cycles, branches, etc. |
-| **`precord`** / **`preport`**| Run `perf record -g` for sampling / `perf report` to view |
+| `s [user@host]` | SSH to the saved server. Pass `user@host` once to set it (stored in `~/.config/dotfiles/server`). |
+| `t` | Attach / create the `main` tmux session. |
+| `fdwork` | 3-pane workspace in the current dir: editor, build shell, `htop`. Re-run to re-attach. |
+| `makefd` | `make -j fdctl solana firedancer-dev`. |
+| `pullfd` | `git pull`, submodules, `deps.sh`, then build. |
+| `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
+| `devfd` / `pktfd` | Run `firedancer-dev dev` / `pktgen` with `~/config.toml`. |
+| `confd` | Edit `~/config.toml`. |
 
----
+## Performance
 
-## 3. Seamless Navigation
-*How to move around at the speed of light.*
-
-| Shortcut | Action | Tool |
-| :--- | :--- | :--- |
-| **`Ctrl` + `h/j/k/l`** | **Move between Neovim splits *and* Tmux panes** | Global |
-| **`Shift` + `→ / ←`** | **Fast switch Tmux windows** (tabs) | Tmux |
-| **`gd`** | Go to definition under cursor | Neovim |
-| **`<leader>e`** | Show floating diagnostics / errors | Neovim |
-| **`<leader>ff`** | Fuzzy find files | Neovim |
-| **`<leader>fg`** | Live grep / search inside all files | Neovim |
-
----
-
-## 4. Window & Pane Splitting
-*Managing your screen real estate.*
-> **Tmux Prefix = `Ctrl+A`**
-
-| Shortcut | Action | Tool |
-| :--- | :--- | :--- |
-| **`Prefix` + `h/j/k/l`** | **Split pane** left / down / up / right | Tmux |
-| **`Prefix` + `Shift` + `H/J/K/L`** | **Resize pane** in that direction | Tmux |
-| **`Prefix` + `Z`** | **Zoom** (fullscreen) current pane, press again to unzoom | Tmux |
-| **`Prefix` + `C`** | Create a new Tmux window | Tmux |
-| **`Prefix` + `D`** | Detach from session (leaves everything running) | Tmux |
-| **`Cmd` + `Enter` / `T`** | Open a new local Kitty Window or Tab | Kitty |
-
----
-
-## 5. Editor Extras (Neovim)
-
-| Shortcut | Action |
+| Command | Action |
 | :--- | :--- |
-| **`<leader>fb`** | Find open buffers |
-| **`:NvimTreeToggle`** | Open the sidebar file explorer |
-| **`:Git`** | Open Fugitive (Git interface) |
+| `htop` / `btop` | Preconfigured monitors: per-core meters, per-process core column, kernel threads shown, 0-based core IDs, CPU% sort. |
+| `disable-ht` | Disable hyperthreading. |
+| `memfd` | Release 2MB & 1GB hugepages on NUMA node0. |
+| `clockspeed <ghz>` | Pin min/max CPU frequency. |
+| `pstat` | `perf stat` — cache misses, cycles, branches. |
+| `precord` / `preport` | `perf record -g` / `perf report`. |
+
+## Navigation
+
+| Keys | Action |
+| :--- | :--- |
+| `Ctrl h/j/k/l` | Move between Neovim splits and tmux panes. |
+| `Shift ←/→` | Switch tmux windows. |
+| `gd` | Go to definition. |
+| `Leader ff` / `fg` / `fb` | Find files / live grep / buffers. |
+
+## Tmux — Prefix = `F1`
+
+| Keys | Action |
+| :--- | :--- |
+| `Prefix h/j/k/l` | Split pane left / down / up / right. |
+| `Prefix z` | Zoom pane (toggle). |
+| `Prefix c` / `d` | New window / detach. |
+| `Prefix r` | Reload config. |
+| `Prefix Ctrl-s` / `Ctrl-r` | Save / restore sessions. |
+| Mouse drag border | Resize pane. |
+| `Cmd Enter` / `Cmd T` | New Kitty window / tab. |
+
+Sessions auto-save and restore across reboots and SSH drops (tmux-continuum). Plugins are managed by TPM; `install.sh` sets it up, or reinstall with `~/.tmux/plugins/tpm/bin/install_plugins`.
+
+## Neovim
+
+| Keys | Action |
+| :--- | :--- |
+| `Leader e` | Diagnostics float. |
+| `Leader m` / `mr` / `mc` | `:make` / run / clean. |
+| `Leader d` / `db` / `du` | Debug: continue / breakpoint / UI. |
+| `Leader v` | Valgrind `./main`. |
+| `:NvimTreeToggle` | File explorer. |
+| `:Git` | Fugitive. |
