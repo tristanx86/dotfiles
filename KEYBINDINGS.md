@@ -14,9 +14,9 @@ Run `helpdot` to read this in the terminal.
 | `pullfd` | `git pull`, submodules, `deps.sh`, then build. |
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
 | `devfd` / `pktfd` | Run the current binary's `dev` / `pktgen` with `~/config.toml`. |
+| `pktfd setup` | Set up mel0 for firedancer (route + static ARP), then optionally launch DPDK pktgen on mel1 → mel0 (cores 14 & 15). mlx5 loopback testing. |
 | `flamefd` | Capture a `perf` flamegraph (current binary's `flame`). |
 | `metricsfd` | Print the validator's Prometheus metrics (current binary's `metrics`). |
-| `setuppktfd` | Set up mel0 for firedancer (route + static ARP), then optionally launch DPDK pktgen on mel1 → mel0 (cores 14 & 15). mlx5 loopback testing. |
 | `cfgfd` | Edit the active config file. |
 | `cfgfd new <name>` | Create a config (seeded from the active one) and switch to it. |
 | `cfgfd ls` | List config files; `*` marks the active one. |

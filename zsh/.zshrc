@@ -189,17 +189,20 @@ function switchfd() {
 
 function makefd()    { make -j $(_fdtarget); }
 function pullfd()    { git pull && git submodule update && ./deps.sh && make -j $(_fdtarget); }
-function pktfd()     { sudo "$(_fdbin)" pktgen --config "$(_fdconfig)"; }
+function pktfd() {
+    if [ "$1" = setup ]; then shift; _pktfd_setup "$@"; return; fi
+    sudo "$(_fdbin)" pktgen --config "$(_fdconfig)"
+}
 function devfd()     { sudo "$(_fdbin)" dev --config "$(_fdconfig)"; }
 function flamefd()   { sudo "$(_fdbin)" flame --config "$(_fdconfig)"; }    # perf flamegraph
 function metricsfd() { sudo "$(_fdbin)" metrics --config "$(_fdconfig)"; }  # Prometheus metrics
 
-# setuppktfd: point mel0 at the firedancer peer (route + static ARP), then
+# pktfd setup: point mel0 at the firedancer peer (route + static ARP), then
 # optionally launch DPDK pktgen on mel1 aimed back at mel0. Designed for mlx5
 # loopback testing: name the firedancer NIC 'mel0' and the pktgen NIC 'mel1'.
-function setuppktfd() {
+function _pktfd_setup() {
     if ! ip link show mel0 >/dev/null 2>&1; then
-        echo "setuppktfd: interface 'mel0' not found."
+        echo "pktfd setup: interface 'mel0' not found."
         echo "  Name the NIC used for running firedancer 'mel0', and give it a /30:"
         echo "    sudo ip addr add 169.254.1.1/30 dev mel0"
         return 1
@@ -217,12 +220,12 @@ function setuppktfd() {
     esac
 
     if ! ip link show mel1 >/dev/null 2>&1; then
-        echo "setuppktfd: interface 'mel1' not found."
+        echo "pktfd setup: interface 'mel1' not found."
         echo "  This setup is designed for mlx5 testing — name one NIC 'mel1' to use for DPDK pktgen."
         return 1
     fi
     if ! command -v pktgen >/dev/null 2>&1; then
-        echo "setuppktfd: WARNING — DPDK/pktgen does not appear to be installed."
+        echo "pktfd setup: WARNING — DPDK/pktgen does not appear to be installed."
         echo "  Unless you know what you are doing, do not use this provided DPDK pktgen setup."
         return 1
     fi
@@ -232,7 +235,7 @@ function setuppktfd() {
     dstmac=$(cat /sys/class/net/mel0/address)
     dstip=$(ip -4 -o addr show dev mel0 | awk '{print $4}' | grep '^169\.' | head -1 | cut -d/ -f1)
     if [ -z "$dstip" ]; then
-        echo "setuppktfd: mel0 has no 169.x IPv4. Set one, e.g.: sudo ip addr add 169.254.1.1/30 dev mel0"
+        echo "pktfd setup: mel0 has no 169.x IPv4. Set one, e.g.: sudo ip addr add 169.254.1.1/30 dev mel0"
         return 1
     fi
     pci=$(basename "$(readlink -f /sys/class/net/mel1/device)")   # e.g. 0000:01:00.1
@@ -242,7 +245,7 @@ function setuppktfd() {
     nicnode=$(cat /sys/class/net/mel1/device/numa_node 2>/dev/null)
     for n in /sys/devices/system/cpu/cpu14/node*(N); do corenode=${n##*/node}; done
     if [ -n "$nicnode" ] && [ "$nicnode" != "-1" ] && [ -n "$corenode" ] && [ "$nicnode" != "$corenode" ]; then
-        echo "setuppktfd: WARNING — mel1 is on NUMA node $nicnode but cores 13-15 are on node $corenode."
+        echo "pktfd setup: WARNING — mel1 is on NUMA node $nicnode but cores 13-15 are on node $corenode."
         echo "  Cross-socket DMA will skew results; pin to cores on node $nicnode for accurate numbers."
     fi
 
@@ -250,7 +253,7 @@ function setuppktfd() {
     echo 1024 | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null
 
     # pktgen runtime commands (loaded via -f): UDP 64B from the .2 peer -> mel0:9000.
-    cmds=/tmp/setuppktfd.pkt
+    cmds=/tmp/pktfd-setup.pkt
     cat > "$cmds" <<EOF
 set 0 dst mac $dstmac
 set 0 dst ip $dstip
