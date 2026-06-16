@@ -61,13 +61,8 @@ if [[ "$OS" == "Darwin" ]]; then
 
 # ── Linux Configuration (Dell/Razer) ─────────────────
 elif [[ "$OS" == "Linux" ]]; then
-    # Performance Analysis Tools (perf wrappers)
-    # Basic cache miss and cycle analysis
+    # Cache miss / cycle analysis
     alias pstat="sudo perf stat -e cache-misses,cache-references,cycles,instructions,branches,branch-misses"
-    
-    # Sampling profiler configuration
-    alias precord="sudo perf record -g"
-    alias preport="sudo perf report"
 
     # ── Screen Power Management (X Authority Fix) ────────────────
     # Use these functions to safely turn off the screen power when SSHing.
@@ -116,26 +111,36 @@ alias gco='git checkout'
 alias gl='git log --oneline --graph --decorate'
 alias gd='git diff'
 
-# ── Aliases: Session Management ──────────────────────
-# Attach to existing 'main' session or create new
-alias t="tmux new-session -A -s main"
+# ── Tmux ─────────────────────────────────────────────
+alias tl='tmux ls'                      # list sessions
+alias tn='tmux new -s'                  # tn <name>  — new session
+alias tk='tmux kill-session -t'         # tk <name>  — kill session
+function ta() { tmux attach ${1:+-t "$1"}; }   # ta [name] — attach (last if omitted)
 
-# 3-pane workspace in the current dir: editor | build shell / htop.
-# Re-run to re-attach (works inside or outside tmux).
+# fdwork: lay out a dev window in the CURRENT session — editor | build / htop.
 function fdwork() {
-    local session="fd"
-    if tmux has-session -t "$session" 2>/dev/null; then
-        if [ -n "$TMUX" ]; then tmux switch-client -t "$session"; else tmux attach -t "$session"; fi
-        return
+    if [ -z "$TMUX" ]; then
+        echo "fdwork must run inside tmux. Start a session first:  tn <name>   (or attach: ta)"
+        return 1
     fi
-    local dir="$PWD"
-    tmux new-session -d -s "$session" -c "$dir" -n dev
-    tmux split-window -h  -t "$session:dev"   -c "$dir"   # pane 1: right column
-    tmux split-window -v  -t "$session:dev.1" -c "$dir"   # pane 2: bottom-right
-    tmux send-keys -t "$session:dev.2" 'command -v htop >/dev/null && htop || top' C-m
-    tmux select-pane -t "$session:dev.0"
-    tmux send-keys -t "$session:dev.0" 'nvim .' C-m
-    if [ -n "$TMUX" ]; then tmux switch-client -t "$session"; else tmux attach -t "$session"; fi
+    local dir="$PWD" p0 p1 p2
+    p0=$(tmux new-window  -P -F '#{pane_id}' -n dev -c "$dir")
+    p1=$(tmux split-window -h -t "$p0" -P -F '#{pane_id}' -c "$dir")
+    p2=$(tmux split-window -v -t "$p1" -P -F '#{pane_id}' -c "$dir")
+    tmux send-keys -t "$p2" 'command -v htop >/dev/null && htop || top' C-m
+    tmux send-keys -t "$p0" 'nvim .' C-m
+    tmux select-pane -t "$p0"
+}
+
+# dothelp: render the cheat sheet in a pager (resolves the repo via ~/.zshrc).
+function dothelp() {
+    local rc="$HOME/.zshrc"
+    local doc="${rc:A:h:h}/KEYBINDINGS.md"   # follow symlink -> repo root
+    [ -f "$doc" ] || doc="$HOME/dotfiles/KEYBINDINGS.md"
+    if [ ! -f "$doc" ]; then echo "dothelp: KEYBINDINGS.md not found"; return 1; fi
+    if command -v glow >/dev/null; then glow -p "$doc"
+    elif command -v bat >/dev/null; then bat --style=plain --paging=always -l md "$doc"
+    else less -R "$doc"; fi
 }
 
 # ── Firedancer Development ───────────────────────────

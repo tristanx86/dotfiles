@@ -204,10 +204,6 @@ require("lazy").setup({
 vim.keymap.set('n', '<leader>e', vim.diagnostic.open_float, { desc = 'Show diagnostics' })
 vim.keymap.set('n', 'gd', vim.lsp.buf.definition, { desc = 'Go to definition' })
 
-vim.keymap.set('n', '<leader>m', ':make<CR>', { desc = 'Run Make' })
-vim.keymap.set('n', '<leader>mr', ':make run<CR>', { desc = 'Make Run' })
-vim.keymap.set('n', '<leader>mc', ':make clean<CR>', { desc = 'Make Clean' })
-
 vim.keymap.set('n', '<leader>d', function() require("dap").continue() end, { desc = 'Debug: Start/Continue' })
 vim.keymap.set('n', '<leader>db', function() require("dap").toggle_breakpoint() end, { desc = 'Debug: Toggle Breakpoint' })
 vim.keymap.set('n', '<leader>du', function() require("dapui").toggle() end, { desc = 'Debug: Toggle UI' })
@@ -215,5 +211,3 @@ vim.keymap.set('n', '<leader>du', function() require("dapui").toggle() end, { de
 vim.keymap.set('n', '<leader>ff', function() require('telescope.builtin').find_files() end, { desc = 'Find Files' })
 vim.keymap.set('n', '<leader>fg', function() require('telescope.builtin').live_grep() end, { desc = 'Grep Files' })
 vim.keymap.set('n', '<leader>fb', function() require('telescope.builtin').buffers() end, { desc = 'Find Buffers' })
-
-vim.keymap.set('n', '<leader>v', ':!valgrind --leak-check=full ./main<CR>', { desc = 'Run Valgrind' })
