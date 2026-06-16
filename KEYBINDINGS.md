@@ -8,7 +8,7 @@ Run `dothelp` to read this in the terminal.
 | :--- | :--- |
 | `dothelp` | Show this cheat sheet. |
 | `s [user@host]` | SSH to the saved server. Pass `user@host` once to set it (stored in `~/.config/dotfiles/server`). |
-| `makefd` | `make -j fdctl solana firedancer-dev`. |
+| `makefd` | `make -j firedancer-dev`. |
 | `pullfd` | `git pull`, submodules, `deps.sh`, then build. |
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
 | `devfd` / `pktfd` | Run `firedancer-dev dev` / `pktgen` with `~/config.toml`. |

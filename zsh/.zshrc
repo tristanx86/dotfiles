@@ -144,8 +144,8 @@ function dothelp() {
 }
 
 # ── Firedancer Development ───────────────────────────
-alias makefd="make -j fdctl solana firedancer-dev"
-alias pullfd="git pull && git submodule update && ./deps.sh && make -j fdctl solana firedancer-dev"
+alias makefd="make -j firedancer-dev"
+alias pullfd="git pull && git submodule update && ./deps.sh && make -j firedancer-dev"
 alias pktfd="sudo firedancer-dev pktgen --config ~/config.toml"
 alias devfd="sudo firedancer-dev dev --config ~/config.toml"
 alias confd="nvim ~/config.toml"
@@ -175,7 +175,7 @@ function branchfd() {
     fi
     git pull
     git checkout -b "$1" "tristan/tristanx86/$1" || { echo "Error: Branch checkout failed. Make sure the remote branch exists."; return 1; }
-    make -j fdctl solana firedancer-dev
+    make -j firedancer-dev
 }
 
 # ── Prompt Configuration ─────────────────────────────
