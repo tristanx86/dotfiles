@@ -187,6 +187,11 @@ function switchfd() {
     echo "Firedancer binary set to: $1 (make target: $(_fdtarget))"
 }
 
+# These were aliases historically; drop any stale alias so re-sourcing .zshrc
+# (without a fresh shell) doesn't shadow the functions — an alias would make
+# `pktfd setup` expand to `... pktgen ... setup` instead of running the setup.
+unalias makefd pullfd pktfd devfd flamefd metricsfd 2>/dev/null
+
 function makefd()    { make -j $(_fdtarget); }
 function pullfd()    { git pull && git submodule update && ./deps.sh && make -j $(_fdtarget); }
 function pktfd() {
