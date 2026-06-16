@@ -45,7 +45,7 @@ Manage sessions from the shell:
 | `ta [name]` | Attach (last session if omitted). |
 | `tl` | List sessions. |
 | `tk <name>` | Kill session. |
-| `fdwork` | Ultrawide dev window in the current session: file tree, 3 editor columns, and a right column of 3 command panes + htop. Run inside tmux. |
+| `fdwork` | Ultrawide dev window in the current session: file tree, 2 terminal columns (left split with a command pane below), and a right column of 2 command panes + htop. Run inside tmux. |
 
 Inside a session (Prefix = `F1`):
 

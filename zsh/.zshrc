@@ -118,36 +118,36 @@ alias tk='tmux kill-session -t'         # tk <name>  — kill session
 function ta() { tmux attach ${1:+-t "$1"}; }   # ta [name] — attach (last if omitted)
 
 # fdwork: ultrawide dev window in the CURRENT session. Layout (left -> right):
-#   tree | term | term | term | [ cmd / cmd / cmd / htop ]
-# A narrow file tree, three tall terminals, then a right column of three short
-# stacked command panes plus htop. Run inside tmux (needs tmux >= 3.1 for %).
+#   tree | code1 (67%) / cmd (33%) | code2 | [ cmd / cmd / htop ]
+# A file tree, two terminal columns (the left one split with a command pane
+# below), then a right column of two command panes plus htop.
+# Run inside tmux (needs tmux >= 3.1 for %).
 function fdwork() {
     if [ -z "$TMUX" ]; then
         echo "fdwork must run inside tmux. Start a session first:  tn <name>   (or attach: ta)"
         return 1
     fi
     local dir="$PWD"
-    local tree rest cmdcol code1 code2 code3 cmd1 cmd2 cmd3 htop
+    local tree rest cmdcol code1 code2 codecmd cmd1 cmd2 htop
     local mon='command -v htop >/dev/null && htop || top'
 
-    # Columns: tree (~6%) | code area (~64%) | command column (~30%).
+    # Columns: tree (~9%) | code area (~61%, 2 cols) | command column (~30%).
     tree=$(tmux new-window   -P -F '#{pane_id}' -n dev -c "$dir")
-    rest=$(tmux split-window -h -t "$tree" -l 94% -P -F '#{pane_id}' -c "$dir")
-    cmdcol=$(tmux split-window -h -t "$rest" -l 34% -P -F '#{pane_id}' -c "$dir")
+    rest=$(tmux split-window -h -t "$tree" -l 91% -P -F '#{pane_id}' -c "$dir")
+    cmdcol=$(tmux split-window -h -t "$rest" -l 33% -P -F '#{pane_id}' -c "$dir")
 
-    # Code area -> three editor columns.
+    # Code area -> two terminal columns; left column gets a command pane below.
     code1="$rest"
-    code2=$(tmux split-window -h -t "$code1" -l 66% -P -F '#{pane_id}' -c "$dir")
-    code3=$(tmux split-window -h -t "$code2" -l 50% -P -F '#{pane_id}' -c "$dir")
+    code2=$(tmux split-window -h -t "$code1" -l 50% -P -F '#{pane_id}' -c "$dir")
+    codecmd=$(tmux split-window -v -t "$code1" -l 33% -P -F '#{pane_id}' -c "$dir")
 
-    # Command column -> three short panes stacked above htop.
+    # Command column -> two command panes stacked above htop.
     cmd1="$cmdcol"
-    cmd2=$(tmux split-window -v -t "$cmd1" -l 75% -P -F '#{pane_id}' -c "$dir")
-    cmd3=$(tmux split-window -v -t "$cmd2" -l 66% -P -F '#{pane_id}' -c "$dir")
-    htop=$(tmux split-window -v -t "$cmd3" -l 50% -P -F '#{pane_id}' -c "$dir")
+    cmd2=$(tmux split-window -v -t "$cmd1" -l 66% -P -F '#{pane_id}' -c "$dir")
+    htop=$(tmux split-window -v -t "$cmd2" -l 50% -P -F '#{pane_id}' -c "$dir")
 
     tmux send-keys -t "$tree" 'nvim .' C-m     # nvim-tree file explorer
-    tmux send-keys -t "$htop" "$mon" C-m       # code columns stay as plain shells
+    tmux send-keys -t "$htop" "$mon" C-m       # code/cmd columns stay as plain shells
     tmux select-pane -t "$code1"
 }
 
