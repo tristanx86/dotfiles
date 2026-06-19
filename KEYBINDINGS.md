@@ -14,7 +14,7 @@ Run `helpdot` to read this in the terminal.
 | `pullfd` | `git pull`, submodules, `deps.sh`, then build. |
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
 | `devfd` / `pktfd` | Run the current binary's `dev` / `pktgen` with `~/config.toml`. |
-| `pktfd setup` | mlx5 physical loopback testing. |
+| `pktfd setup` | fd pktgen setup and optional physical loopback DPDK pktgen setup. |
 | `flamefd` | Capture a `perf` flamegraph (current binary's `flame`). |
 | `metricsfd` | Print the validator's Prometheus metrics (current binary's `metrics`). |
 | `cfgfd` | Edit the active config file. |

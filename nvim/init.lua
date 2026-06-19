@@ -61,7 +61,7 @@ vim.api.nvim_create_autocmd({ "BufEnter", "WinEnter" }, {
 -- ── Plugin Specification ─────────────────────────────────
 require("lazy").setup({
   -- UI & Theme
-  { 
+  {
     "folke/tokyonight.nvim",
     priority = 1000, -- Forces theme to load first to prevent unstyled text flashes
     config = function()
@@ -86,9 +86,9 @@ require("lazy").setup({
       vim.cmd[[colorscheme tokyonight]]
     end
   },
-  { 
-    "nvim-lualine/lualine.nvim", 
-    opts = { options = { theme = "tokyonight", section_separators = "", component_separators = "" } } 
+  {
+    "nvim-lualine/lualine.nvim",
+    opts = { options = { theme = "tokyonight", section_separators = "", component_separators = "" } }
   },
   { "lewis6991/gitsigns.nvim", opts = {} },
   { "nvim-tree/nvim-tree.lua", dependencies = { "nvim-tree/nvim-web-devicons" }, opts = {} },
@@ -99,8 +99,8 @@ require("lazy").setup({
   { "tpope/vim-fugitive" },
 
   -- Syntax & Parsing
-  { 
-    "nvim-treesitter/nvim-treesitter", 
+  {
+    "nvim-treesitter/nvim-treesitter",
     build = ":TSUpdate",
     config = function()
       require("nvim-treesitter.configs").setup({
@@ -114,7 +114,7 @@ require("lazy").setup({
 
   -- LSP & Auto-Completion
   { "williamboman/mason.nvim", opts = {} },
-  { 
+  {
     "williamboman/mason-lspconfig.nvim",
     config = function()
       local servers = { "clangd", "pyright", "lua_ls" }
@@ -162,7 +162,7 @@ require("lazy").setup({
   },
 
   -- Debugging & Linting
-  { 
+  {
     "mfussenegger/nvim-dap",
     config = function()
       local dap = require("dap")
@@ -175,8 +175,8 @@ require("lazy").setup({
       dap.configurations.cpp = dap.configurations.c
     end
   },
-  { 
-    "rcarriga/nvim-dap-ui", 
+  {
+    "rcarriga/nvim-dap-ui",
     dependencies = { "mfussenegger/nvim-dap", "nvim-neotest/nvim-nio" },
     config = function()
       local dap, dapui = require("dap"), require("dapui")
@@ -186,7 +186,7 @@ require("lazy").setup({
       dap.listeners.before.event_exited["dapui_config"] = function() dapui.close() end
     end
   },
-  { 
+  {
     "nvimtools/none-ls.nvim",
     config = function()
       local null_ls = require("null-ls")

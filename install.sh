@@ -113,19 +113,20 @@ create_symlink() {
     local src=$1
     local dest=$2
     mkdir -p "$(dirname "$dest")"
-    
+
     # Check if destination exists
     if [ -e "$dest" ] || [ -L "$dest" ]; then
         # If it is a symlink AND already points to our source, we are good to go
         if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
             return
         fi
-        
+
         # Otherwise, back it up
-        echo "[Backup] Moving existing $dest to ${dest}.backup.$(date +%s)"
-        mv "$dest" "${dest}.backup.$(date +%s)"
+        local backup="${dest}.backup.$(date +%s)"
+        echo "[Backup] Moving existing $dest to $backup"
+        mv "$dest" "$backup"
     fi
-    
+
     ln -sf "$src" "$dest"
     echo "[Link] $dest -> $src"
 }

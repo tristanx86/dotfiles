@@ -15,3 +15,4 @@ Copy and paste this one-liner into your terminal to clone (or update) the reposi
 
 ```bash
 git clone https://github.com/tristanx86/dotfiles.git ~/dotfiles 2>/dev/null || (cd ~/dotfiles && git fetch && git reset --hard origin/main) && chmod +x ~/dotfiles/install.sh && ~/dotfiles/install.sh && exec zsh
+```
