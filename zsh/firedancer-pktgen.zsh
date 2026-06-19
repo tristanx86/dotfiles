@@ -126,10 +126,19 @@ function _pktfd_setup() {
         echo "  Free memory or reboot if pktgen reports insufficient hugepage memory."
     fi
 
-    if ! grep -q ' /dev/hugepages hugetlbfs ' /proc/mounts; then
-        echo "Mounting hugetlbfs (2MB) at /dev/hugepages..."
-        sudo mkdir -p /dev/hugepages
-        sudo mount -t hugetlbfs -o pagesize=2M nodev /dev/hugepages
+    # EAL matches hugetlbfs mounts to pages *by page size*. A pre-existing
+    # /dev/hugepages is often a 1GB mount (default_hugepagesz=1G), which is why
+    # reserving 2MB pages still yields "no mounted hugetlbfs found for that
+    # size". So mount our own dedicated 2MB hugetlbfs rather than assuming
+    # /dev/hugepages is 2MB. (EAL scans all mounts, so any 2MB mount works.)
+    local hugemnt=/mnt/huge-2m
+    if ! grep -q " $hugemnt hugetlbfs " /proc/mounts; then
+        echo "Mounting 2MB hugetlbfs at $hugemnt..."
+        sudo mkdir -p "$hugemnt"
+        sudo mount -t hugetlbfs -o pagesize=2M nodev "$hugemnt"
+    fi
+    if ! grep -q " $hugemnt hugetlbfs " /proc/mounts; then
+        echo "pktfd setup: WARNING — failed to mount a 2MB hugetlbfs at $hugemnt; pktgen will likely abort."
     fi
 
     # pktgen runtime commands (loaded via -f): UDP 64B from the .2 peer -> mel0:9000.
@@ -145,5 +154,5 @@ set 0 src ip 169.254.1.2/30
 EOF
 
     echo "Launching pktgen on mel1 ($pci) -> mel0 ($dstip / $dstmac), lcores $lcores (main $main)..."
-    sudo pktgen -l "$lcores" -n 4 -a "$pci" --main-lcore "$main" -- -m "$map" -f "$cmds"
+    sudo pktgen -l "$lcores" -n 4 -a "$pci" --main-lcore "$main" --huge-dir "$hugemnt" -- -m "$map" -f "$cmds"
 }
