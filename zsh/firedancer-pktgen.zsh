@@ -109,36 +109,14 @@ function _pktfd_setup() {
     echo "  $rxcore    RX core"
     echo "  $txrange  TX core(s) x$ntx  ->  ~${est} Mpps max (rough 30 Mpps/core guide, capped by NIC line rate)"
 
-    # Hugepages: DPDK/pktgen needs 2MB hugepages *and* a mounted hugetlbfs to
-    # back them — reserving nr_hugepages alone gives "no mounted hugetlbfs found
-    # for that size". Reserve a generous count that scales with TX cores (on the
-    # NIC's NUMA node when known), then mount hugetlbfs if the kernel hasn't.
-    local npages=$(( 2048 + (ntx - 1) * 512 ))   # ~4 GiB + 1 GiB per extra TX core
-    local hp_path=/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
-    local hp_node="/sys/devices/system/node/node${nicnode}/hugepages/hugepages-2048kB/nr_hugepages"
-    [ -n "$nicnode" ] && [ "$nicnode" != "-1" ] && [ -e "$hp_node" ] && hp_path="$hp_node"
-
-    echo "Reserving $npages x 2MB hugepages ($((npages * 2)) MiB) via $hp_path..."
-    echo "$npages" | sudo tee "$hp_path" >/dev/null
-    local got; got=$(cat "$hp_path" 2>/dev/null)
-    if [ -n "$got" ] && [ "$got" -lt "$npages" ]; then
-        echo "pktfd setup: WARNING — kernel reserved only $got/$npages hugepages (likely memory fragmentation)."
-        echo "  Free memory or reboot if pktgen reports insufficient hugepage memory."
-    fi
-
-    # EAL matches hugetlbfs mounts to pages *by page size*. A pre-existing
-    # /dev/hugepages is often a 1GB mount (default_hugepagesz=1G), which is why
-    # reserving 2MB pages still yields "no mounted hugetlbfs found for that
-    # size". So mount our own dedicated 2MB hugetlbfs rather than assuming
-    # /dev/hugepages is 2MB. (EAL scans all mounts, so any 2MB mount works.)
-    local hugemnt=/mnt/huge-2m
-    if ! grep -q " $hugemnt hugetlbfs " /proc/mounts; then
-        echo "Mounting 2MB hugetlbfs at $hugemnt..."
-        sudo mkdir -p "$hugemnt"
-        sudo mount -t hugetlbfs -o pagesize=2M nodev "$hugemnt"
-    fi
-    if ! grep -q " $hugemnt hugetlbfs " /proc/mounts; then
-        echo "pktfd setup: WARNING — failed to mount a 2MB hugetlbfs at $hugemnt; pktgen will likely abort."
+    # Reserve 2MB hugepages (1024 per TX core), and mount a 2MB hugetlbfs to back
+    # them if one isn't already mounted — reserving alone gives EAL "no mounted
+    # hugetlbfs found for that size" (e.g. when the system default is 1GB pages).
+    local npages=$(( 1024 * ntx ))
+    echo "Reserving $npages x 2MB hugepages ($((npages * 2)) MiB)..."
+    echo "$npages" | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null
+    if ! grep -q 'hugetlbfs.*pagesize=2M' /proc/mounts; then
+        sudo mkdir -p /mnt/huge && sudo mount -t hugetlbfs -o pagesize=2M nodev /mnt/huge
     fi
 
     # pktgen runtime commands (loaded via -f): UDP 64B from the .2 peer -> mel0:9000.
@@ -154,5 +132,5 @@ set 0 src ip 169.254.1.2/30
 EOF
 
     echo "Launching pktgen on mel1 ($pci) -> mel0 ($dstip / $dstmac), lcores $lcores (main $main)..."
-    sudo pktgen -l "$lcores" -n 4 -a "$pci" --main-lcore "$main" --huge-dir "$hugemnt" -- -m "$map" -f "$cmds"
+    sudo pktgen -l "$lcores" -n 4 -a "$pci" --main-lcore "$main" -- -m "$map" -f "$cmds"
 }
