@@ -109,8 +109,28 @@ function _pktfd_setup() {
     echo "  $rxcore    RX core"
     echo "  $txrange  TX core(s) x$ntx  ->  ~${est} Mpps max (rough 30 Mpps/core guide, capped by NIC line rate)"
 
-    echo "Allocating 1024x 2MB hugepages (system-wide, not pinned to node $nicnode)..."
-    echo 1024 | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null
+    # Hugepages: DPDK/pktgen needs 2MB hugepages *and* a mounted hugetlbfs to
+    # back them — reserving nr_hugepages alone gives "no mounted hugetlbfs found
+    # for that size". Reserve a generous count that scales with TX cores (on the
+    # NIC's NUMA node when known), then mount hugetlbfs if the kernel hasn't.
+    local npages=$(( 2048 + (ntx - 1) * 512 ))   # ~4 GiB + 1 GiB per extra TX core
+    local hp_path=/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+    local hp_node="/sys/devices/system/node/node${nicnode}/hugepages/hugepages-2048kB/nr_hugepages"
+    [ -n "$nicnode" ] && [ "$nicnode" != "-1" ] && [ -e "$hp_node" ] && hp_path="$hp_node"
+
+    echo "Reserving $npages x 2MB hugepages ($((npages * 2)) MiB) via $hp_path..."
+    echo "$npages" | sudo tee "$hp_path" >/dev/null
+    local got; got=$(cat "$hp_path" 2>/dev/null)
+    if [ -n "$got" ] && [ "$got" -lt "$npages" ]; then
+        echo "pktfd setup: WARNING — kernel reserved only $got/$npages hugepages (likely memory fragmentation)."
+        echo "  Free memory or reboot if pktgen reports insufficient hugepage memory."
+    fi
+
+    if ! grep -q ' /dev/hugepages hugetlbfs ' /proc/mounts; then
+        echo "Mounting hugetlbfs (2MB) at /dev/hugepages..."
+        sudo mkdir -p /dev/hugepages
+        sudo mount -t hugetlbfs -o pagesize=2M nodev /dev/hugepages
+    fi
 
     # pktgen runtime commands (loaded via -f): UDP 64B from the .2 peer -> mel0:9000.
     cmds=/tmp/pktfd-setup.pkt
