@@ -113,15 +113,21 @@ alias gd='git diff'
 # Restore the saved snapshot once per server lifetime, the first time tl/ta runs.
 # The @restored flag means a later `tk` stays killed, and `tn` (which never calls
 # this) always gives a fresh session — but `tn foo` then `tl` still brings the rest back.
+# Restore the saved snapshot exactly once per boot, the first time tl/ta runs.
+# The marker lives in XDG_RUNTIME_DIR (/tmp fallback) so it survives killing
+# every session but resets on reboot. tn never calls this, so a fresh tn -- and
+# a tk'd session -- never come back; but `tn foo` then `tl` still restores the rest.
 function _tmux_restore() {
-    tmux start-server
-    [ "$(tmux show -gv @restored 2>/dev/null)" = 1 ] && return
+    local marker="${XDG_RUNTIME_DIR:-/tmp}/tmux-restored-$UID"
+    [ -e "$marker" ] && return
     local restore="$HOME/.tmux/plugins/tmux-resurrect/scripts/restore.sh"
-    [ -x "$restore" ] && tmux run-shell "$restore"
-    tmux set -g @restored 1
+    [ -x "$restore" ] || return
+    : > "$marker"
+    tmux start-server 2>/dev/null
+    tmux run-shell "$restore" 2>/dev/null
     for _ in 1 2 3 4 5; do tmux has-session 2>/dev/null && break; sleep 0.2; done
 }
-function tl() { _tmux_restore; tmux ls; }                                          # list sessions
+function tl() { _tmux_restore; tmux ls 2>/dev/null || echo "no tmux sessions"; }                   # list sessions
 function ta() { _tmux_restore; tmux attach ${1:+-t "$1"} 2>/dev/null || tmux new ${1:+-s "$1"}; }  # attach (last if omitted)
 alias tn='tmux new -s'                  # tn <name>  — new session
 alias tk='tmux kill-session -t'         # tk <name>  — kill session

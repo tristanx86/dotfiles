@@ -127,7 +127,10 @@ require("lazy").setup({
     lazy = false,
     build = ":TSUpdate",
     config = function()
-      require("nvim-treesitter").install({ "c", "cpp", "lua", "rust", "python", "bash" })
+      local ts = require("nvim-treesitter")
+      -- Guard: skip when the plugin hasn't been synced to the `main` branch yet
+      -- (master has no .install), so startup never hard-errors. Run :Lazy restore.
+      if ts.install then ts.install({ "c", "cpp", "lua", "rust", "python", "bash" }) end
       vim.api.nvim_create_autocmd("FileType", {
         pattern = { "c", "cpp", "lua", "rust", "python", "sh" },
         callback = function() pcall(vim.treesitter.start) end,
