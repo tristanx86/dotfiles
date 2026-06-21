@@ -102,7 +102,11 @@ fi
 # -----------------------------------------------------------------------------
 if ! command -v tree-sitter >/dev/null 2>&1; then
     echo "[Neovim] Installing tree-sitter CLI..."
-    npm install -g tree-sitter-cli || echo "[WARNING] tree-sitter CLI install failed; nvim-treesitter parsers won't build."
+    # Plain install works where the npm prefix is user-writable (brew); fall
+    # back to sudo for system prefixes (apt's /usr/local).
+    npm install -g tree-sitter-cli 2>/dev/null \
+        || sudo npm install -g tree-sitter-cli \
+        || echo "[WARNING] tree-sitter CLI install failed; nvim-treesitter parsers won't build."
 fi
 
 # -----------------------------------------------------------------------------
