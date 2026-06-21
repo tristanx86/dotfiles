@@ -61,8 +61,6 @@ if [[ "$OS" == "Darwin" ]]; then
 
 # ── Linux Configuration (Dell/Razer) ─────────────────
 elif [[ "$OS" == "Linux" ]]; then
-    # Cache miss / cycle analysis
-    alias pstat="sudo perf stat -e cache-misses,cache-references,cycles,instructions,branches,branch-misses"
 
     # ── Screen Power Management (X Authority Fix) ────────────────
     # Use these functions to safely turn off the screen power when SSHing.
@@ -112,26 +110,21 @@ alias gl='git log --oneline --graph --decorate'
 alias gd='git diff'
 
 # ── Tmux ─────────────────────────────────────────────
-# tl — list sessions. Starts the server first when none is running so
-# tmux-continuum auto-restores saved sessions (e.g. after a reboot).
-function tl() {
-    if ! tmux has-session 2>/dev/null; then
-        tmux start-server
-        for _ in 1 2 3 4 5; do tmux has-session 2>/dev/null && break; sleep 0.2; done
-    fi
-    tmux ls
+# Restore the saved snapshot once per server lifetime, the first time tl/ta runs.
+# The @restored flag means a later `tk` stays killed, and `tn` (which never calls
+# this) always gives a fresh session — but `tn foo` then `tl` still brings the rest back.
+function _tmux_restore() {
+    tmux start-server
+    [ "$(tmux show -gv @restored 2>/dev/null)" = 1 ] && return
+    local restore="$HOME/.tmux/plugins/tmux-resurrect/scripts/restore.sh"
+    [ -x "$restore" ] && tmux run-shell "$restore"
+    tmux set -g @restored 1
+    for _ in 1 2 3 4 5; do tmux has-session 2>/dev/null && break; sleep 0.2; done
 }
+function tl() { _tmux_restore; tmux ls; }                                          # list sessions
+function ta() { _tmux_restore; tmux attach ${1:+-t "$1"} 2>/dev/null || tmux new ${1:+-s "$1"}; }  # attach (last if omitted)
 alias tn='tmux new -s'                  # tn <name>  — new session
 alias tk='tmux kill-session -t'         # tk <name>  — kill session
-# ta [name] — attach (last if omitted). Starts the server first when none is
-# running so tmux-continuum auto-restores saved sessions after a reboot.
-function ta() {
-    if ! tmux has-session 2>/dev/null; then
-        tmux start-server
-        for _ in 1 2 3 4 5; do tmux has-session 2>/dev/null && break; sleep 0.2; done
-    fi
-    tmux attach ${1:+-t "$1"} 2>/dev/null || tmux new ${1:+-s "$1"}
-}
 
 # fdwork: ultrawide dev window in the CURRENT session. Layout (left -> right):
 #   tree | code1 (67%) / cmd (33%) | code2 | [ cmd / cmd / htop ]
@@ -167,16 +160,19 @@ function fdwork() {
     tmux select-pane -t "$code1"
 }
 
-# helpdot: render the cheat sheet in a pager (resolves the repo via ~/.zshrc).
-function helpdot() {
+# _renderdot <file.md>: render a cheat sheet from the repo root in a pager.
+function _renderdot() {
     local rc="$HOME/.zshrc"
-    local doc="${rc:A:h:h}/KEYBINDINGS.md"   # follow symlink -> repo root
-    [ -f "$doc" ] || doc="$HOME/dotfiles/KEYBINDINGS.md"
-    if [ ! -f "$doc" ]; then echo "helpdot: KEYBINDINGS.md not found"; return 1; fi
+    local doc="${rc:A:h:h}/$1"   # follow symlink -> repo root
+    [ -f "$doc" ] || doc="$HOME/dotfiles/$1"
+    if [ ! -f "$doc" ]; then echo "${1} not found"; return 1; fi
     if command -v glow >/dev/null; then glow -p "$doc"
     elif command -v bat >/dev/null; then bat --style=plain --paging=always -l md "$doc"
     else less -R "$doc"; fi
 }
+function helpdot() { _renderdot MAIN_cmds.md; }      # main cheat sheet
+function termdot() { _renderdot terminal_cmds.md; }  # terminal cmds I forget
+function perfdot() { _renderdot perf_cmds.md; }      # perf / measurement cmds
 
 # updatedot: pull the latest dotfiles, re-run install.sh, reload the shell.
 function updatedot() {

@@ -46,6 +46,14 @@ elif [[ "$OS" == "Linux" ]]; then
                         cmake clang lldb lld cppcheck pkg-config libssl-dev \
                         tmux gdb zoxide htop btop numactl
 
+    # Performance / measurement tooling (perf_cmds.md). Best-effort: a missing
+    # package on some distros must not abort the core install.
+    echo "[Linux] Installing performance / measurement tooling..."
+    sudo apt-get install -y \
+        linux-tools-common linux-tools-generic \
+        bpftrace bpfcc-tools trace-cmd sysstat \
+        || echo "[WARNING] some perf tools unavailable; install manually (see perf_cmds.md)."
+
     # Install Rust if not present
     if ! command -v cargo &>/dev/null; then
         echo "[Linux] Installing Rust..."

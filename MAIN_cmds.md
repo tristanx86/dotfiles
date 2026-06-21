@@ -4,8 +4,6 @@
 
 | Command | Action |
 | :--- | :--- |
-| `helpdot` | Show this cheat sheet. |
-| `updatedot` | Pull dotfiles, re-run `install.sh`, reload shell. |
 | `s [user@host]` | SSH to saved server; pass `user@host` once to set it. |
 | `switchfd [name]` | Pick the firedancer binary `*fd` commands drive. |
 | `makefd` | Build the binary's make target (`fddev` also builds solana). |
@@ -15,6 +13,7 @@
 | `pktfd setup` | fd pktgen + optional physical loopback DPDK setup. |
 | `flamefd` | Capture a `perf` flamegraph. |
 | `metricsfd` | Print Prometheus metrics. |
+| `relmemfd` | Release 2MB & 1GB hugepages. |
 | `cfgfd` | Edit active config. |
 | `cfgfd new <name>` | Create config (seeded from active) and switch. |
 | `cfgfd ls` | List configs; `*` marks active. |
@@ -22,16 +21,12 @@
 | `cfgfd rm <name>` | Delete a config. |
 | `cfgfd path` | Print active config path. |
 
-## Performance
-
-| Command | Action |
+| dot cmds | |
 | :--- | :--- |
-| `htop` / `btop` | Preconfigured monitors (per-core, kernel threads, CPU% sort). |
-| `topo` | CPU topology + NUMA layout for tile pinning. |
-| `enable-ht` / `disable-ht` | Toggle hyperthreading. |
-| `relmemfd` | Release 2MB & 1GB hugepages. |
-| `clockspeed <ghz>` | Pin min/max CPU frequency. |
-| `pstat` | `perf stat` — cache misses, cycles, branches. |
+| `helpdot` | This main cheat sheet. |
+| `termdot` | Terminal cmds I forget. |
+| `perfdot` | Perf / measurement cmds. |
+| `updatedot` | Pull dotfiles, re-run `install.sh`, reload shell. |
 
 ## Navigation
 
@@ -76,15 +71,3 @@ Leader = `F1`.
 | `:Git` | Fugitive. |
 
 Tree: `y` copies abs path, `Enter` copies `nvim <path>`.
-
-## Standard Keybinds (that I sometimes forget)
-
-| Keys | Action |
-| :--- | :--- |
-| `Ctrl u` | Clear the current input line. |
-| `Ctrl w` | Delete previous word. |
-| `Ctrl a` / `Ctrl e` | Jump to start / end of line. |
-| `Ctrl k` | Delete to end of line. |
-| `Ctrl l` | Clear screen. |
-| `Ctrl r` | Reverse history search. |
-| `Ctrl c` / `Ctrl d` | Cancel input / EOF (exit shell). |
