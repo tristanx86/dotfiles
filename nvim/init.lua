@@ -120,15 +120,18 @@ require("lazy").setup({
   { "nvim-telescope/telescope.nvim", dependencies = { "nvim-lua/plenary.nvim" }, opts = {} },
   { "tpope/vim-fugitive" },
 
-  -- Syntax & Parsing
+  -- Syntax & Parsing (nvim-treesitter `main` branch — Neovim 0.11+ API)
   {
     "nvim-treesitter/nvim-treesitter",
+    branch = "main",
+    lazy = false,
     build = ":TSUpdate",
     config = function()
-      require("nvim-treesitter.configs").setup({
-        ensure_installed = { "c", "cpp", "lua", "rust", "python", "bash" },
-        auto_install = true,
-        highlight = { enable = true },
+      require("nvim-treesitter").install({ "c", "cpp", "lua", "rust", "python", "bash" })
+      vim.api.nvim_create_autocmd("FileType", {
+        pattern = { "c", "cpp", "lua", "rust", "python", "sh" },
+        callback = function() pcall(vim.treesitter.start) end,
+        desc = "Enable treesitter highlighting",
       })
     end
   },

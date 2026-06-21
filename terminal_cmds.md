@@ -22,5 +22,5 @@
 
 | Command | Action |
 | :--- | :--- |
-| `sudo poweroff` | Shut down now (`sudo shutdown` waits 1 min). |
+| `sudo poweroff` | Shut down now. |
 | `sudo reboot` | Reboot now. |

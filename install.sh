@@ -98,6 +98,14 @@ elif [[ "$OS" == "Linux" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
+# tree-sitter CLI (required by nvim-treesitter `main` branch to build parsers)
+# -----------------------------------------------------------------------------
+if ! command -v tree-sitter >/dev/null 2>&1; then
+    echo "[Neovim] Installing tree-sitter CLI..."
+    npm install -g tree-sitter-cli || echo "[WARNING] tree-sitter CLI install failed; nvim-treesitter parsers won't build."
+fi
+
+# -----------------------------------------------------------------------------
 # Shell Configuration & Symlinking
 # -----------------------------------------------------------------------------
 if [ ! -d "$HOME/.oh-my-zsh" ]; then

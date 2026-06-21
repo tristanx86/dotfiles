@@ -67,7 +67,6 @@ Leader = `F1`.
 | `Leader ff` / `fg` / `fb` | Find files / live grep / buffers. |
 | `Leader e` | Diagnostics float. |
 | `Leader d` / `db` / `du` | Debug: continue / breakpoint / UI. |
-| `:NvimTreeToggle` | File explorer. |
 | `:Git` | Fugitive. |
 
 Tree: `y` copies abs path, `Enter` copies `nvim <path>`.
