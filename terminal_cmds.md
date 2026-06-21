@@ -17,3 +17,10 @@
 | `Ctrl r` | Reverse history search (repeat for older matches). |
 | `Ctrl g` | Cancel history search. |
 | `Ctrl l` | Clear screen. |
+
+## Power
+
+| Command | Action |
+| :--- | :--- |
+| `sudo poweroff` | Shut down now (`sudo shutdown` waits 1 min). |
+| `sudo reboot` | Reboot now. |
