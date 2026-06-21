@@ -1,37 +1,35 @@
 # Cheat Sheet
 
-Run `helpdot` to read this in the terminal.
-
 ## Shell
 
 | Command | Action |
 | :--- | :--- |
 | `helpdot` | Show this cheat sheet. |
-| `updatedot` | Pull the latest dotfiles, re-run `install.sh`, reload the shell. |
-| `s [user@host]` | SSH to the saved server. Pass `user@host` once to set it (stored in `~/.config/dotfiles/server`). |
-| `switchfd [name]` | Pick the firedancer binary the `*fd` commands drive (`firedancer-dev`, `fddev`, `firedancer`, …). No arg shows the current one. |
-| `makefd` | Build the current binary's make target (`fddev` also builds `solana`). |
-| `pullfd` | `git pull`, submodules, `deps.sh`, then build. |
+| `updatedot` | Pull dotfiles, re-run `install.sh`, reload shell. |
+| `s [user@host]` | SSH to saved server; pass `user@host` once to set it. |
+| `switchfd [name]` | Pick the firedancer binary `*fd` commands drive. |
+| `makefd` | Build the binary's make target (`fddev` also builds solana). |
+| `pullfd` | `git pull`, submodules, `deps.sh`, build. |
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
-| `devfd` / `pktfd` | Run the current binary's `dev` / `pktgen` with `~/config.toml`. |
-| `pktfd setup` | fd pktgen setup and optional physical loopback DPDK pktgen setup. |
-| `flamefd` | Capture a `perf` flamegraph (current binary's `flame`). |
-| `metricsfd` | Print the validator's Prometheus metrics (current binary's `metrics`). |
-| `cfgfd` | Edit the active config file. |
-| `cfgfd new <name>` | Create a config (seeded from the active one) and switch to it. |
-| `cfgfd ls` | List config files; `*` marks the active one. |
-| `cfgfd use <name>` | Switch the active config (persisted across restarts). |
-| `cfgfd rm <name>` | Delete a config file. |
-| `cfgfd cur` | Print the active config's path. |
+| `devfd` / `pktfd` | Run the binary's `dev` / `pktgen` with `~/config.toml`. |
+| `pktfd setup` | fd pktgen + optional physical loopback DPDK setup. |
+| `flamefd` | Capture a `perf` flamegraph. |
+| `metricsfd` | Print Prometheus metrics. |
+| `cfgfd` | Edit active config. |
+| `cfgfd new <name>` | Create config (seeded from active) and switch. |
+| `cfgfd ls` | List configs; `*` marks active. |
+| `cfgfd <name>` | Switch active config. |
+| `cfgfd rm <name>` | Delete a config. |
+| `cfgfd path` | Print active config path. |
 
 ## Performance
 
 | Command | Action |
 | :--- | :--- |
-| `htop` / `btop` | Preconfigured monitors: per-core meters, per-process core column, kernel threads shown, 0-based core IDs, CPU% sort. |
-| `topo` | CPU topology + NUMA layout (cores, HT siblings, isolated CPUs) for tile pinning. |
-| `enable-ht` / `disable-ht` | Enable / disable hyperthreading. |
-| `relmemfd` | Release 2MB & 1GB hugepages on NUMA node0. |
+| `htop` / `btop` | Preconfigured monitors (per-core, kernel threads, CPU% sort). |
+| `topo` | CPU topology + NUMA layout for tile pinning. |
+| `enable-ht` / `disable-ht` | Toggle hyperthreading. |
+| `relmemfd` | Release 2MB & 1GB hugepages. |
 | `clockspeed <ghz>` | Pin min/max CPU frequency. |
 | `pstat` | `perf stat` — cache misses, cycles, branches. |
 
@@ -45,35 +43,29 @@ Run `helpdot` to read this in the terminal.
 
 ## Tmux
 
-> Prefix key = `F1` (unified with Neovim's leader).
-
-Manage sessions from the shell:
+Prefix = `F1`. Manage sessions from the shell:
 
 | Command | Action |
 | :--- | :--- |
 | `tn <name>` | New session. |
-| `ta [name]` | Attach (last session if omitted). |
-| `tl` | List sessions. |
-| `tk <name>` | Kill session. |
-| `fdwork` | Ultrawide dev window in the current session: file tree, 2 terminal columns (left split with a command pane below), and a right column of 2 command panes + htop. Run inside tmux. |
+| `ta [name]` | Attach (last if omitted). |
+| `tl` / `tk <name>` | List / kill sessions. |
+| `fdwork` | Ultrawide dev window: tree, 2 terminal columns, right column of 2 panes + htop. |
 
-Inside a session (Prefix = `F1`):
+Inside a session:
 
 | Keys | Action |
 | :--- | :--- |
 | `Prefix h/j/k/l` | Split pane left / down / up / right. |
-| `Prefix z` | Zoom pane (toggle). |
+| `Prefix z` | Zoom pane. |
 | `Prefix c` / `d` | New window / detach. |
 | `Prefix r` | Reload config. |
 | `Prefix Ctrl-s` / `Ctrl-r` | Save / restore sessions. |
-| Mouse drag border | Resize pane. |
 | `Cmd Enter` / `Cmd T` | New Kitty window / tab. |
-
-Sessions auto-save and restore across reboots and SSH drops (tmux-continuum).
 
 ## Neovim
 
-> Leader key = `F1` (unified with tmux's prefix).
+Leader = `F1`.
 
 | Keys | Action |
 | :--- | :--- |
@@ -82,3 +74,17 @@ Sessions auto-save and restore across reboots and SSH drops (tmux-continuum).
 | `Leader d` / `db` / `du` | Debug: continue / breakpoint / UI. |
 | `:NvimTreeToggle` | File explorer. |
 | `:Git` | Fugitive. |
+
+Tree: `y` copies abs path, `Enter` copies `nvim <path>`.
+
+## Standard Keybinds (that I sometimes forget)
+
+| Keys | Action |
+| :--- | :--- |
+| `Ctrl u` | Clear the current input line. |
+| `Ctrl w` | Delete previous word. |
+| `Ctrl a` / `Ctrl e` | Jump to start / end of line. |
+| `Ctrl k` | Delete to end of line. |
+| `Ctrl l` | Clear screen. |
+| `Ctrl r` | Reverse history search. |
+| `Ctrl c` / `Ctrl d` | Cancel input / EOF (exit shell). |

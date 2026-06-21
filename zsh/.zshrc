@@ -112,10 +112,26 @@ alias gl='git log --oneline --graph --decorate'
 alias gd='git diff'
 
 # ── Tmux ─────────────────────────────────────────────
-alias tl='tmux ls'                      # list sessions
+# tl — list sessions. Starts the server first when none is running so
+# tmux-continuum auto-restores saved sessions (e.g. after a reboot).
+function tl() {
+    if ! tmux has-session 2>/dev/null; then
+        tmux start-server
+        for _ in 1 2 3 4 5; do tmux has-session 2>/dev/null && break; sleep 0.2; done
+    fi
+    tmux ls
+}
 alias tn='tmux new -s'                  # tn <name>  — new session
 alias tk='tmux kill-session -t'         # tk <name>  — kill session
-function ta() { tmux attach ${1:+-t "$1"}; }   # ta [name] — attach (last if omitted)
+# ta [name] — attach (last if omitted). Starts the server first when none is
+# running so tmux-continuum auto-restores saved sessions after a reboot.
+function ta() {
+    if ! tmux has-session 2>/dev/null; then
+        tmux start-server
+        for _ in 1 2 3 4 5; do tmux has-session 2>/dev/null && break; sleep 0.2; done
+    fi
+    tmux attach ${1:+-t "$1"} 2>/dev/null || tmux new ${1:+-s "$1"}
+}
 
 # fdwork: ultrawide dev window in the CURRENT session. Layout (left -> right):
 #   tree | code1 (67%) / cmd (33%) | code2 | [ cmd / cmd / htop ]

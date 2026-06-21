@@ -91,7 +91,29 @@ require("lazy").setup({
     opts = { options = { theme = "tokyonight", section_separators = "", component_separators = "" } }
   },
   { "lewis6991/gitsigns.nvim", opts = {} },
-  { "nvim-tree/nvim-tree.lua", dependencies = { "nvim-tree/nvim-web-devicons" }, opts = {} },
+  {
+    "nvim-tree/nvim-tree.lua",
+    dependencies = { "nvim-tree/nvim-web-devicons" },
+    opts = {
+      actions = { use_system_clipboard = true },
+      -- Copy via '+' so it rides OSC 52 to the Mac clipboard.
+      on_attach = function(bufnr)
+        local api = require("nvim-tree.api")
+        api.config.mappings.default_on_attach(bufnr)
+        local function map(key, get, desc)
+          vim.keymap.set("n", key, function()
+            local node = api.tree.get_node_under_cursor()
+            if not node then return end
+            local value = get(node)
+            vim.fn.setreg("+", value)
+            vim.notify("Copied: " .. value)
+          end, { desc = desc, buffer = bufnr, noremap = true, silent = true, nowait = true })
+        end
+        map("y",    function(n) return n.absolute_path end,            "Copy path")
+        map("<CR>", function(n) return "nvim " .. n.absolute_path end, "Copy nvim cmd")
+      end,
+    },
+  },
 
   -- Navigation
   { "christoomey/vim-tmux-navigator" },

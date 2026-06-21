@@ -42,21 +42,16 @@ function cfgfd() {
             [ "$current" = "$1" ] && rm -f "$FD_CONFIG_FILE"   # fall back to ~/config.toml
             echo "Deleted config: $1"
             ;;
-        use)
-            [ -z "$1" ] && { echo "Usage: cfgfd use <name>"; return 1; }
-            [ -f "$FD_CONFIG_DIR/$1.toml" ] || { echo "cfgfd: no config named '$1'. Run 'cfgfd ls'."; return 1; }
-            echo "$1" > "$FD_CONFIG_FILE"
-            echo "Switched to config: $1 ($FD_CONFIG_DIR/$1.toml)"
-            ;;
         "")
             ${EDITOR:-nvim} "$(_fdconfig)"
             ;;
-        cur)
+        path)
             echo "Active config: $(_fdconfig)"
             ;;
         *)
-            echo "Usage: cfgfd | cfgfd {new <name>|ls|rm <name>|use <name>|cur}"
-            return 1
+            [ -f "$FD_CONFIG_DIR/$cmd.toml" ] || { echo "cfgfd: no config named '$cmd'. Run 'cfgfd ls'."; return 1; }
+            echo "$cmd" > "$FD_CONFIG_FILE"
+            echo "Switched to config: $cmd ($FD_CONFIG_DIR/$cmd.toml)"
             ;;
     esac
 }
