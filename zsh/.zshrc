@@ -160,15 +160,32 @@ function fdwork() {
     tmux select-pane -t "$code1"
 }
 
-# _renderdot <file.md>: render a cheat sheet from the repo root in a pager.
+# _renderdot <file.md>: render a markdown cheat sheet as clean, man-like text.
+# The .md files stay as GitHub tables; this strips the markup for the terminal.
 function _renderdot() {
     local rc="$HOME/.zshrc"
     local doc="${rc:A:h:h}/$1"   # follow symlink -> repo root
     [ -f "$doc" ] || doc="$HOME/dotfiles/$1"
     if [ ! -f "$doc" ]; then echo "${1} not found"; return 1; fi
-    if command -v glow >/dev/null; then glow -p "$doc"
-    elif command -v bat >/dev/null; then bat --style=plain --paging=always -l md "$doc"
-    else less -R "$doc"; fi
+    awk '
+        function strip(s){ gsub(/`/,"",s); gsub(/\*\*/,"",s); return s }
+        function trim(s){ gsub(/^[ \t]+|[ \t]+$/,"",s); return s }
+        BEGIN { b="\033[1m"; r="\033[0m"; col=20 }
+        /^#[^#]/        { next }                                       # drop H1 title
+        /^## /          { sub(/^## /,""); printf "\n" b toupper($0) r "\n"; next }
+        /^\|[ ]*:?-+/   { next }                                       # table separator
+        /^\|/ {
+            split($0,a,"|"); c=trim(a[2]); d=trim(a[3])
+            if (c=="Command" || c=="Keys") next                       # generic header
+            c=strip(c); d=strip(d)
+            if (d=="")               { printf "\n" b c r "\n"; next }  # subheader (e.g. dot cmds)
+            else if (length(c)<=col)   printf "  %-*s  %s\n", col, c, d
+            else                       printf "  %s\n  %*s  %s\n", c, col, "", d
+            next
+        }
+        /^[ \t]*$/      { next }                                       # drop blank lines
+        { print "  " strip($0) }                                      # prose
+    ' "$doc" | less -FRX
 }
 function helpdot() { _renderdot MAIN_cmds.md; }      # main cheat sheet
 function termdot() { _renderdot terminal_cmds.md; }  # terminal cmds I forget
