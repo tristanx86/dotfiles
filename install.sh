@@ -169,6 +169,15 @@ if [ -x "$HOME/.tmux/plugins/tpm/bin/install_plugins" ]; then
     "$HOME/.tmux/plugins/tpm/bin/install_plugins" || echo "[WARNING] tmux plugin install failed; run prefix+I inside tmux."
 fi
 
+# Sync Neovim plugins to the lockfile and build treesitter parsers, so updatedot
+# is self-contained (restore switches nvim-treesitter to its `main` branch).
+if command -v nvim >/dev/null 2>&1; then
+    echo "[Neovim] Syncing plugins & building parsers..."
+    nvim --headless "+Lazy! restore" +qa 2>/dev/null
+    nvim --headless "+lua require('nvim-treesitter').install({'c','cpp','lua','rust','python','bash'}):wait(300000)" +qa 2>/dev/null \
+        || echo "[WARNING] treesitter parser build failed; open nvim and run :TSUpdate."
+fi
+
 # -----------------------------------------------------------------------------
 # htop / btop preconfiguration
 # -----------------------------------------------------------------------------

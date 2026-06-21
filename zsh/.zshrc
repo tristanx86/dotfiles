@@ -127,8 +127,15 @@ function _tmux_restore() {
     tmux run-shell "$restore" 2>/dev/null
     for _ in 1 2 3 4 5; do tmux has-session 2>/dev/null && break; sleep 0.2; done
 }
-function tl() { _tmux_restore; tmux ls 2>/dev/null || echo "no tmux sessions"; }                   # list sessions
-function ta() { _tmux_restore; tmux attach ${1:+-t "$1"} 2>/dev/null || tmux new ${1:+-s "$1"}; }  # attach (last if omitted)
+function tl() { _tmux_restore; tmux ls 2>/dev/null || echo "no tmux sessions"; }   # list sessions
+function ta() {                                                                    # attach (last if omitted)
+    _tmux_restore
+    if [ -n "$1" ]; then
+        tmux attach -t "$1" 2>/dev/null || tmux new -s "$1"
+    else
+        tmux attach 2>/dev/null || tmux new
+    fi
+}
 alias tn='tmux new -s'                  # tn <name>  — new session
 alias tk='tmux kill-session -t'         # tk <name>  — kill session
 
