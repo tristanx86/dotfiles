@@ -294,13 +294,26 @@ function _pktfd_restore() {
         echo "  Check 'ip link'; you may need to re-run, or the driver '$drv' failed to attach."
         return 1
     fi
-    if [ -n "$name" ] && [ "$newname" != "$name" ]; then
+    name=${name:-$newname}
+    if [ "$newname" != "$name" ]; then
         echo "Renaming '$newname' -> '$name'..."
         sudo ip link set "$newname" down && \
-        sudo ip link set "$newname" name "$name" && \
-        sudo ip link set "$name" up
+        sudo ip link set "$newname" name "$name"
+    fi
+    sudo ip link set "$name" up
+
+    # The vfio-pci bind destroyed the old netdev, so the reborn fdi1 has no IP.
+    # Re-add the /30 link address, and bring fdi0 back up: while fdi1 was off the
+    # kernel its cabled partner lost carrier and went NO-CARRIER (DOWN).
+    if ! ip -4 -o addr show dev "$name" | grep -q '169\.'; then
+        echo "Re-adding 169.254.1.2/30 to $name (lost when the netdev was destroyed)..."
+        sudo ip addr add 169.254.1.2/30 dev "$name"
+    fi
+    if ip link show fdi0 >/dev/null 2>&1; then
+        echo "Bouncing fdi0 to re-establish carrier on the loopback link..."
+        sudo ip link set fdi0 down && sudo ip link set fdi0 up
     fi
 
     rm -f "$state"
-    echo "Done — ${name:-$newname} is back on the kernel driver."
+    echo "Done — $name is back on the kernel driver; fdi0/$name link restored."
 }
