@@ -10,7 +10,8 @@
 | `pullfd` | `git pull`, submodules, `deps.sh`, build. |
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
 | `devfd` / `pktfd` | Run the binary's `dev` / `pktgen` with `~/config.toml`. |
-| `pktfd setup` | fd pktgen + optional physical loopback DPDK setup. |
+| `pktfd setup` | fd pktgen + optional physical loopback DPDK setup (renames NICs to fdi0/fdi1, any DPDK NIC). |
+| `pktfd restore` | Rebind the pktgen NIC to its kernel driver after a vfio-pci `setup` run. |
 | `flamefd` | Capture a `perf` flamegraph. |
 | `metricsfd` | Print Prometheus metrics. |
 | `relmemfd` | Release 2MB & 1GB hugepages. |
