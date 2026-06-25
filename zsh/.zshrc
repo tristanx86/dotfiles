@@ -110,26 +110,24 @@ alias gl='git log --oneline --graph --decorate'
 alias gd='git diff'
 
 # ── Tmux ─────────────────────────────────────────────
-# Restore the saved snapshot once per server lifetime, the first time tl/ta runs.
-# The @restored flag means a later `tk` stays killed, and `tn` (which never calls
-# this) always gives a fresh session — but `tn foo` then `tl` still brings the rest back.
-# Restore the saved snapshot exactly once per boot, the first time tl/ta runs.
-# The marker lives in XDG_RUNTIME_DIR (/tmp fallback) so it survives killing
-# every session but resets on reboot. tn never calls this, so a fresh tn -- and
-# a tk'd session -- never come back; but `tn foo` then `tl` still restores the rest.
-function _tmux_restore() {
-    local marker="${XDG_RUNTIME_DIR:-/tmp}/tmux-restored-$UID"
-    [ -e "$marker" ] && return
-    local restore="$HOME/.tmux/plugins/tmux-resurrect/scripts/restore.sh"
-    [ -x "$restore" ] || return
-    : > "$marker"
-    tmux start-server 2>/dev/null
-    tmux run-shell "$restore" 2>/dev/null
-    for _ in 1 2 3 4 5; do tmux has-session 2>/dev/null && break; sleep 0.2; done
+# continuum auto-saves every 5 min; with @continuum-restore 'on' it restores the
+# saved sessions when the tmux server first starts after a reboot. A freshly
+# started *empty* server exits before that background restore lands, so _tmux_boot
+# anchors it with a throwaway session, waits for a restored one to appear, then
+# drops the holder. tl/ta cold-start through this; tn/tk stay plain (so once the
+# server is up, tn gives a fresh session and tk stays killed).
+function _tmux_boot() {
+    tmux ls >/dev/null 2>&1 && return                  # server already up — nothing to do
+    tmux new-session -d -s _boot 2>/dev/null || return # holder keeps the new server alive
+    for _ in {1..25}; do                               # up to ~5s for continuum to restore
+        tmux ls 2>/dev/null | grep -qv '^_boot:' && break
+        sleep 0.2
+    done
+    tmux kill-session -t _boot 2>/dev/null             # drop holder (leaves the restored set)
 }
-function tl() { _tmux_restore; tmux ls 2>/dev/null || echo "no tmux sessions"; }   # list sessions
-function ta() {                                                                    # attach (last if omitted)
-    _tmux_restore
+function tl() { _tmux_boot; tmux ls 2>/dev/null || echo "no tmux sessions"; }   # list sessions
+function ta() {                                                                 # attach (last if omitted)
+    _tmux_boot
     if [ -n "$1" ]; then
         tmux attach -t "$1" 2>/dev/null || tmux new -s "$1"
     else
