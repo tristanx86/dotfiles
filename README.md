@@ -7,7 +7,8 @@ Sets up my configured development environment with Neovim, tmux, Zsh, and Kitty.
 Ensure `git` is installed before running the setup.
 
 * **macOS:** Running `git` in the terminal will automatically prompt you to install the Command Line Tools if it's missing.
-* **Linux:** `sudo apt update && sudo apt install git -y`
+* **Debian/Ubuntu:** `sudo apt update && sudo apt install git -y`
+* **Red Hat / Fedora / Rocky / Alma:** `sudo dnf install git -y`
 
 ## Installation
 

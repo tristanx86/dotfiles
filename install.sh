@@ -37,22 +37,100 @@ if [[ "$OS" == "Darwin" ]]; then
 # Linux Setup
 # -----------------------------------------------------------------------------
 elif [[ "$OS" == "Linux" ]]; then
-    echo "[Linux] Detected. Updating package lists..."
-    sudo apt-get update -y
+    # Detect distro family by available package manager
+    if command -v apt-get &>/dev/null; then
+        DISTRO_FAMILY="debian"
+    elif command -v dnf &>/dev/null; then
+        DISTRO_FAMILY="rhel"; RHEL_PKG="dnf"
+    elif command -v yum &>/dev/null; then
+        DISTRO_FAMILY="rhel"; RHEL_PKG="yum"
+    else
+        DISTRO_FAMILY="unknown"
+        echo "[WARNING] No supported package manager found (apt-get/dnf/yum). Skipping system packages."
+    fi
 
-    echo "[Linux] Installing System & Dev Dependencies..."
-    sudo apt-get install -y build-essential git zsh curl wget unzip tar \
-                        xclip nodejs npm ripgrep fd-find python3-venv \
-                        cmake clang lldb lld cppcheck pkg-config libssl-dev \
-                        tmux gdb zoxide htop btop numactl
+    # ---- Debian / Ubuntu -----------------------------------------------------
+    if [[ "$DISTRO_FAMILY" == "debian" ]]; then
+        echo "[Linux/Debian] Updating package lists..."
+        sudo apt-get update -y
 
-    # Performance / measurement tooling (perf_cmds.md). Best-effort: a missing
-    # package on some distros must not abort the core install.
-    echo "[Linux] Installing performance / measurement tooling..."
-    sudo apt-get install -y \
-        linux-tools-common linux-tools-generic \
-        bpftrace bpfcc-tools trace-cmd sysstat \
-        || echo "[WARNING] some perf tools unavailable; install manually (see perf_cmds.md)."
+        echo "[Linux/Debian] Installing System & Dev Dependencies..."
+        sudo apt-get install -y build-essential git zsh curl wget unzip tar \
+                            xclip nodejs npm ripgrep fd-find python3-venv \
+                            cmake clang lldb lld cppcheck pkg-config libssl-dev \
+                            tmux gdb zoxide htop btop numactl
+
+        # Performance / measurement tooling (perf_cmds.md)
+        echo "[Linux/Debian] Installing performance / measurement tooling..."
+        sudo apt-get install -y \
+            linux-tools-common linux-tools-generic \
+            bpftrace bpfcc-tools trace-cmd sysstat \
+            || echo "[WARNING] some perf tools unavailable; install manually (see perf_cmds.md)."
+
+        # Install Neovim from unstable PPA
+        echo "[Linux/Debian] Adding Neovim Unstable PPA..."
+        sudo add-apt-repository -y ppa:neovim-ppa/unstable
+        sudo apt-get update -y
+        echo "[Linux/Debian] Installing/Upgrading Neovim..."
+        sudo apt-get install -y neovim
+
+        # Kernel-version-specific perf tools (graceful failure for non-matching kernels)
+        sudo apt-get install -y linux-tools-$(uname -r) || \
+            echo "[WARNING] Could not install linux-tools-$(uname -r); perf may still work via linux-tools-generic."
+
+        # Debian/Ubuntu installs fd as 'fdfind'; Neovim telescope expects 'fd'
+        if ! command -v fd &>/dev/null && command -v fdfind &>/dev/null; then
+            sudo ln -sf "$(which fdfind)" /usr/local/bin/fd
+        fi
+
+    # ---- Red Hat / Fedora / Rocky Linux / AlmaLinux / CentOS ----------------
+    elif [[ "$DISTRO_FAMILY" == "rhel" ]]; then
+        echo "[Linux/RHEL] Detected ${RHEL_PKG}-based system."
+
+        # Enable EPEL on non-Fedora systems (provides zoxide, btop, bpftrace, bcc-tools, etc.)
+        DISTRO_ID="$(. /etc/os-release 2>/dev/null && echo "${ID:-}")"
+        if [[ "$DISTRO_ID" != "fedora" ]]; then
+            echo "[Linux/RHEL] Enabling EPEL repository..."
+            sudo "$RHEL_PKG" install -y epel-release \
+                || echo "[WARNING] epel-release unavailable; some packages may be missing."
+        fi
+
+        echo "[Linux/RHEL] Installing System & Dev Dependencies..."
+        # Key name differences vs Debian: gcc gcc-c++ make (≈build-essential),
+        # pkgconf-pkg-config (≈pkg-config), openssl-devel (≈libssl-dev),
+        # python3 python3-pip (≈python3-venv — venv is bundled in python3 on RHEL)
+        sudo "$RHEL_PKG" install -y gcc gcc-c++ make git zsh curl wget unzip tar \
+                            xclip nodejs npm ripgrep fd-find python3 python3-pip \
+                            cmake clang lldb lld cppcheck pkgconf-pkg-config openssl-devel \
+                            tmux gdb zoxide htop btop numactl
+
+        # Performance / measurement tooling
+        # Key name differences: perf (≈linux-tools-*), bcc-tools (≈bpfcc-tools)
+        echo "[Linux/RHEL] Installing performance / measurement tooling..."
+        sudo "$RHEL_PKG" install -y \
+            perf bpftrace bcc-tools trace-cmd sysstat \
+            || echo "[WARNING] some perf tools unavailable; install manually (see perf_cmds.md)."
+
+        # Install Neovim; fall back to pre-built binary from GitHub if not in repos
+        echo "[Linux/RHEL] Installing Neovim..."
+        if ! sudo "$RHEL_PKG" install -y neovim 2>/dev/null; then
+            echo "[Linux/RHEL] Falling back to pre-built Neovim binary from GitHub..."
+            NVIM_ARCHIVE="/tmp/nvim-linux-x86_64.tar.gz"
+            curl -L https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz \
+                -o "$NVIM_ARCHIVE" \
+                && sudo tar -C /usr/local -xzf "$NVIM_ARCHIVE" --strip-components=1 \
+                && rm -f "$NVIM_ARCHIVE" \
+                || echo "[WARNING] Neovim install failed; install manually."
+        fi
+
+        # On RHEL/Fedora, fd-find installs the binary as 'fd' (no symlink needed)
+        if ! command -v fd &>/dev/null; then
+            sudo "$RHEL_PKG" install -y fd-find 2>/dev/null \
+                || echo "[WARNING] fd not installed; Neovim file picker may not work."
+        fi
+    fi
+
+    # ---- Shared Linux (distro-agnostic) --------------------------------------
 
     # Install Rust if not present
     if ! command -v cargo &>/dev/null; then
@@ -60,23 +138,6 @@ elif [[ "$OS" == "Linux" ]]; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         source "$HOME/.cargo/env"
     fi
-
-    # Symlink fd-find to fd (Neovim expects 'fd')
-    if ! command -v fd &>/dev/null; then
-        sudo ln -sf "$(which fdfind)" /usr/local/bin/fd
-    fi
-
-    # Install Neovim Unstable PPA
-    echo "[Linux] Adding Neovim Unstable PPA..."
-    sudo add-apt-repository -y ppa:neovim-ppa/unstable
-    sudo apt-get update -y
-    echo "[Linux] Installing/Upgrading Neovim..."
-    sudo apt-get install -y neovim
-
-    # Install Performance Tools (Graceful failure for mainline kernels)
-    echo "[Linux] Installing Performance Counters (perf)..."
-    sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) || \
-    echo "[WARNING] Could not install linux-tools via apt. Using manually compiled version."
 
     # Install Kitty Terminal
     if ! command -v kitty &>/dev/null; then
@@ -90,7 +151,8 @@ elif [[ "$OS" == "Linux" ]]; then
     if [[ ! -d "$FONT_DIR/FiraCode" ]]; then
         echo "[Linux] Installing FiraCode Nerd Font..."
         mkdir -p "$FONT_DIR/FiraCode"
-        wget -q --show-progress -P "$FONT_DIR/FiraCode" https://github.com/ryanoasis/nerd-fonts/releases/latest/download/FiraCode.zip
+        wget -q --show-progress -P "$FONT_DIR/FiraCode" \
+            https://github.com/ryanoasis/nerd-fonts/releases/latest/download/FiraCode.zip
         unzip -q "$FONT_DIR/FiraCode/FiraCode.zip" -d "$FONT_DIR/FiraCode"
         rm -f "$FONT_DIR/FiraCode/FiraCode.zip"
         fc-cache -fv
