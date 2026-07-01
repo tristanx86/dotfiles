@@ -48,6 +48,50 @@ automatically when you pair loads with load-misses.
 | `hardirqs` / `softirqs` (bcc) | Time spent in IRQ handlers. |
 | `trace-cmd record -p function_graph` | ftrace function-graph capture. |
 
+## Debugging (GDB)
+
+### Start
+
+| Command | Action |
+| :--- | :--- |
+| `gdb <binary>` | Debug a binary (then `run`). |
+| `gdb -p <pid>` | Attach to a running process. |
+| `gdb <binary> <corefile>` | Analyse a core dump. |
+
+### Run, step & break
+
+| Command | Action |
+| :--- | :--- |
+| `run` / `r` | Start. |
+| `continue` / `c` | Continue after a break. |
+| `next` / `n` | Step over. |
+| `step` / `s` | Step into. |
+| `finish` / `fin` | Run until current function returns. |
+| `b <func>` / `b <file>:<line>` | Set breakpoint. |
+| `watch <expr>` | Break when expression changes. |
+| `delete <n>` / `disable <n>` | Remove / disable breakpoint. |
+
+### Inspection
+
+| Command | Action |
+| :--- | :--- |
+| `bt` | Stack trace. |
+| `frame <n>` / `f <n>` | Select stack frame. |
+| `p <expr>` | Print variable or expression. |
+| `x/8xg <addr>` | Examine memory (8 quad-words, hex). |
+| `i r` | All registers. |
+| `info threads` | List threads. |
+| `thread <n>` | Switch thread. |
+| `thread apply all bt` | Backtrace all threads (deadlock diagnosis). |
+
+### Tips
+
+| Command | Action |
+| :--- | :--- |
+| `tui enable` / `Ctrl-x a` | Toggle source+asm TUI view. |
+| `set print pretty on` | Pretty-print structs. |
+| `set pagination off` | No `--More--` prompts. |
+
 ## NIC (ethtool)
 
 | Command | Action |

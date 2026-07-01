@@ -6,6 +6,8 @@
 # stored per-device in an untracked file (defaults to firedancer-dev).
 FD_BIN_FILE="$HOME/.config/dotfiles/fdbin"
 _fdbin() { cat "$FD_BIN_FILE" 2>/dev/null || echo firedancer-dev; }
+# Resolve binary to absolute path so sudo can find it regardless of secure_path (needed on RHEL/Fedora).
+_fdbinpath() { command -v "$(_fdbin)" || _fdbin; }
 # Make target(s) for the current binary. fddev also needs the solana target.
 _fdtarget() { case "$(_fdbin)" in fddev) echo "fddev solana";; *) echo "$(_fdbin)";; esac; }
 
@@ -28,9 +30,9 @@ unalias makefd pullfd pktfd devfd flamefd metricsfd 2>/dev/null
 
 function makefd()    { make -j $(_fdtarget); }
 function pullfd()    { git pull && git submodule update && ./deps.sh && make -j $(_fdtarget); }
-function devfd()     { sudo "$(_fdbin)" dev --config "$(_fdconfig)"; }
-function flamefd()   { sudo "$(_fdbin)" flame --config "$(_fdconfig)"; }    # perf flamegraph
-function metricsfd() { sudo "$(_fdbin)" metrics --config "$(_fdconfig)"; }  # Prometheus metrics
+function devfd()     { sudo "$(_fdbinpath)" dev --config "$(_fdconfig)"; }
+function flamefd()   { sudo "$(_fdbinpath)" flame --config "$(_fdconfig)"; }    # perf flamegraph
+function metricsfd() { sudo "$(_fdbinpath)" metrics --config "$(_fdconfig)"; }  # Prometheus metrics
 
 # ── Firedancer Branch Management ─────────────────────
 function branchfd() {

@@ -27,18 +27,28 @@ vim.opt.shiftwidth = 2
 vim.opt.tabstop = 2
 vim.opt.smartindent = true
 
--- ── Remote Clipboard (OSC 52) ────────────────────────────
-vim.g.clipboard = {
-  name = 'OSC 52',
-  copy = {
-    ['+'] = require('vim.ui.clipboard.osc52').copy('+'),
-    ['*'] = require('vim.ui.clipboard.osc52').copy('*'),
-  },
-  paste = {
-    ['+'] = require('vim.ui.clipboard.osc52').paste('+'),
-    ['*'] = require('vim.ui.clipboard.osc52').paste('*'),
-  },
-}
+-- ── Clipboard ────────────────────────────────────────────
+-- Terminal.app doesn't support OSC 52 — fall back to pbcopy/pbpaste locally.
+-- Everything else (Kitty, iTerm2, SSH sessions) uses OSC 52.
+if vim.env.TERM_PROGRAM == "Apple_Terminal" then
+  vim.g.clipboard = {
+    name = 'pbcopy',
+    copy  = { ['+'] = 'pbcopy',  ['*'] = 'pbcopy'  },
+    paste = { ['+'] = 'pbpaste', ['*'] = 'pbpaste' },
+  }
+else
+  vim.g.clipboard = {
+    name = 'OSC 52',
+    copy = {
+      ['+'] = require('vim.ui.clipboard.osc52').copy('+'),
+      ['*'] = require('vim.ui.clipboard.osc52').copy('*'),
+    },
+    paste = {
+      ['+'] = require('vim.ui.clipboard.osc52').paste('+'),
+      ['*'] = require('vim.ui.clipboard.osc52').paste('*'),
+    },
+  }
+end
 vim.opt.clipboard = "unnamedplus"
 
 -- ── Auto-Commands ────────────────────────────────────────

@@ -6,11 +6,13 @@ fi
 
 # ── Environment & Path Configuration ─────────────────
 export ZSH="$HOME/.oh-my-zsh"
-export EDITOR="nvim"
-export VISUAL="nvim"
-
-# Kitty Terminal SSH Fix (Translates custom terminfo for standard servers)
-[ "$TERM" = "xterm-kitty" ] && export TERM=xterm-256color
+if command -v nvim &>/dev/null; then
+    export EDITOR="nvim"
+    export VISUAL="nvim"
+else
+    export EDITOR="vi"
+    export VISUAL="vi"
+fi
 
 OS="$(uname -s)"
 
@@ -23,10 +25,14 @@ if [[ "$OS" == "Darwin" ]]; then
         eval "$(/usr/local/bin/brew shellenv)"
     fi
 
-    # Build Flags
-    export LDFLAGS="-L$(brew --prefix)/opt/openssl/lib"
-    export CPPFLAGS="-I$(brew --prefix)/opt/openssl/include"
-    export PATH="$(brew --prefix)/opt/llvm/bin:$PATH"
+    # Build Flags — only set when brew is available (skipped on restricted machines).
+    if command -v brew &>/dev/null; then
+        _brew_prefix="$(brew --prefix)"
+        export LDFLAGS="-L${_brew_prefix}/opt/openssl/lib"
+        export CPPFLAGS="-I${_brew_prefix}/opt/openssl/include"
+        export PATH="${_brew_prefix}/opt/llvm/bin:$PATH"
+        unset _brew_prefix
+    fi
 
     # Kitty Terminal Integration
     # 'kitten ssh' automatically propagates terminfo and clipboard capability
@@ -46,7 +52,13 @@ if [[ "$OS" == "Darwin" ]]; then
             echo "No server set. Usage: s user@host (saved for next time)"
             return 1
         fi
-        kitty +kitten ssh "$(cat "$FD_SERVER_FILE")"
+        local server; server="$(cat "$FD_SERVER_FILE")"
+        # kitten ssh propagates terminfo + OSC 52 clipboard; only available in Kitty.
+        if [[ "$TERM_PROGRAM" == "kitty" ]]; then
+            kitty +kitten ssh "$server"
+        else
+            ssh "$server"
+        fi
     }
 
     # Mosh Integration (Optional: requires 'brew install mosh')
@@ -56,7 +68,8 @@ if [[ "$OS" == "Darwin" ]]; then
             echo "No server set. Run 's user@host' first to save one."
             return 1
         fi
-        kitty +kitten ssh --kitten=mosh "$(cat "$FD_SERVER_FILE")"
+        local server; server="$(cat "$FD_SERVER_FILE")"
+        mosh "$server"
     }
 
 # ── Linux Configuration (Dell/Razer) ─────────────────
@@ -184,6 +197,7 @@ function _renderdot() {
         BEGIN { b="\033[1m"; r="\033[0m"; col=20 }
         /^#[^#]/        { next }                                       # drop H1 title
         /^## /          { sub(/^## /,""); printf "\n" b toupper($0) r "\n"; next }
+        /^### /         { sub(/^### /,""); printf "  " b $0 r "\n"; next }
         /^\|[ ]*:?-+/   { next }                                       # table separator
         /^\|/ {
             split($0,a,"|"); c=trim(a[2]); d=trim(a[3])
@@ -257,5 +271,5 @@ function clockspeed() {
 # ── Zoxide Initialization ────────────────────────────
 # Replaces 'z' plugin for faster, algorithm-based directory jumping.
 # Must be initialized at the end of the file.
-eval "$(zoxide init zsh)"
+command -v zoxide &>/dev/null && eval "$(zoxide init zsh)"
 export PATH="$HOME/.local/bin:$PATH"

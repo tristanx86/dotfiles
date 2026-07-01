@@ -10,8 +10,9 @@
 | `pullfd` | `git pull`, submodules, `deps.sh`, build. |
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
 | `devfd` / `pktfd` | Run the binary's `dev` / `pktgen` with `~/config.toml`. |
-| `pktfd setup` | fd pktgen + optional (cabled) loopback DPDK pktgen. |
-| `pktfd restore` | Undo `setup`'s vfio-pci bind — return fdi1 to its kernel driver. |
+| `pktfd ifs [fd pgif]` | Select (or display) which NICs firedancer and pktgen use. |
+| `pktfd setup` | Configure firedancer NIC route/ARP + optional DPDK pktgen on the pktgen NIC. |
+| `pktfd restore` | Undo `setup`'s vfio-pci bind — return the pktgen NIC to its kernel driver. |
 | `flamefd` | Capture a `perf` flamegraph. |
 | `metricsfd` | Print Prometheus metrics. |
 | `relmemfd` | Release 2MB & 1GB hugepages. |

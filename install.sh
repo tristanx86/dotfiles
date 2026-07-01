@@ -32,6 +32,24 @@ if [[ "$OS" == "Darwin" ]]; then
     echo "[MacOS] Installing Core Utilities & Dev Tools..."
     brew install git zsh wget node ripgrep fd neovim cmake llvm cppcheck rustup-init tmux gdb zoxide htop btop
     brew install --cask kitty font-fira-code-nerd-font
+    # Symbols-only Nerd Font: kitty uses it as a glyph fallback so all NF icons
+    # render correctly regardless of which codepoints FiraCode patches in.
+    brew install --cask font-symbols-only-nerd-font 2>/dev/null || true
+
+    # iTerm2: install TokyoNight Dynamic Profile + configure preferences so nothing
+    # needs to be done manually inside the app.
+    ITERM_DIR="$HOME/Library/Application Support/iTerm2"
+    if [ -d "$ITERM_DIR" ]; then
+        mkdir -p "$ITERM_DIR/DynamicProfiles"
+        cp "$DOTFILES_DIR/iterm2/TokyoNight.json" "$ITERM_DIR/DynamicProfiles/"
+        # Set TokyoNight as the default profile (GUID matches the JSON file).
+        defaults write com.googlecode.iterm2 "Default Bookmark Guid" \
+            -string "fd0c77e8-7bb3-4b8c-9d2f-1a2b3c4d5e6f"
+        # Allow OSC 52 clipboard access so copy/paste works over SSH.
+        defaults write com.googlecode.iterm2 AllowClipboardAccess -bool true
+        echo "[MacOS] iTerm2 configured (TokyoNight profile set as default, clipboard enabled)."
+        echo "        Restart iTerm2 for preference changes to take effect."
+    fi
 
 # -----------------------------------------------------------------------------
 # Linux Setup
@@ -103,6 +121,10 @@ elif [[ "$OS" == "Linux" ]]; then
                             xclip nodejs npm ripgrep fd-find python3 python3-pip \
                             cmake clang lldb lld cppcheck pkgconf-pkg-config openssl-devel \
                             tmux gdb zoxide htop btop numactl
+        # kitty-terminfo is in Fedora repos and EPEL; soft-install so SSH sessions
+        # with TERM=xterm-kitty are recognised (clipboard, true colour, etc.).
+        sudo "$RHEL_PKG" install -y kitty-terminfo 2>/dev/null \
+            || echo "[INFO] kitty-terminfo not available; TERM=xterm-kitty may not be recognised."
 
         # Performance / measurement tooling
         # Key name differences: perf (≈linux-tools-*), bcc-tools (≈bpfcc-tools)
@@ -179,6 +201,22 @@ if [ ! -d "$HOME/.oh-my-zsh" ]; then
     sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 fi
 
+# Set zsh as the login shell.
+# chsh may fail on LDAP/managed accounts; we fall back to an exec zsh line in
+# .bashrc so interactive sessions still land in zsh regardless.
+ZSH_BIN="$(command -v zsh 2>/dev/null)"
+if [ -n "$ZSH_BIN" ]; then
+    # zsh must be in /etc/shells before chsh will accept it.
+    if ! grep -qx "$ZSH_BIN" /etc/shells 2>/dev/null; then
+        echo "$ZSH_BIN" | sudo tee -a /etc/shells >/dev/null
+    fi
+    if chsh -s "$ZSH_BIN" "$USER" 2>/dev/null || sudo chsh -s "$ZSH_BIN" "$USER" 2>/dev/null; then
+        echo "[Shell] Login shell set to $ZSH_BIN."
+    else
+        echo "[Shell] chsh failed (managed account?). .bashrc will exec zsh as fallback."
+    fi
+fi
+
 P10K_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
 if [ ! -d "$P10K_DIR" ]; then
     echo "[Shell] Installing Powerlevel10k Theme..."
@@ -214,8 +252,10 @@ create_symlink() {
 }
 
 echo "==== Linking Configuration Files ===="
-create_symlink "$DOTFILES_DIR/zsh/.zshrc" "$HOME/.zshrc"
-create_symlink "$DOTFILES_DIR/zsh/.p10k.zsh" "$HOME/.p10k.zsh"
+create_symlink "$DOTFILES_DIR/zsh/.zshrc"        "$HOME/.zshrc"
+create_symlink "$DOTFILES_DIR/zsh/.p10k.zsh"     "$HOME/.p10k.zsh"
+create_symlink "$DOTFILES_DIR/zsh/.bashrc"        "$HOME/.bashrc"
+create_symlink "$DOTFILES_DIR/zsh/.bash_profile"  "$HOME/.bash_profile"
 create_symlink "$DOTFILES_DIR/tmux/.tmux.conf" "$HOME/.tmux.conf"
 create_symlink "$DOTFILES_DIR/kitty/kitty.conf" "$HOME/.config/kitty/kitty.conf"
 
@@ -315,22 +355,5 @@ fi
 # -----------------------------------------------------------------------------
 # Finalization
 # -----------------------------------------------------------------------------
-echo "==== Changing Default Shell to Zsh ===="
-CURRENT_SHELL=$(basename "$SHELL")
-if [ "$CURRENT_SHELL" != "zsh" ]; then
-    if command -v zsh &>/dev/null; then
-        # On Linux use sudo, on Mac run it normally
-        if [[ "$OS" == "Linux" ]]; then
-            sudo chsh -s "$(which zsh)" "$USER"
-        else
-            chsh -s "$(which zsh)"
-        fi
-        echo "[Shell] Default shell changed to Zsh."
-    else
-        echo "[WARNING] Zsh is not installed. Skipping shell change."
-    fi
-else
-    echo "[Shell] Zsh is already the default shell."
-fi
 
 echo "==== Setup Complete ===="

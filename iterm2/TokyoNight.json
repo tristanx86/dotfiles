@@ -1,0 +1,53 @@
+{
+  "Profiles": [
+    {
+      "Name": "TokyoNight",
+      "Guid": "fd0c77e8-7bb3-4b8c-9d2f-1a2b3c4d5e6f",
+      "Dynamic Profile Parent Name": "Default",
+
+      "Normal Font": "FiraCodeNFM-Reg 13",
+      "Use Non-ASCII Font": false,
+
+      "Allow clipboard access": true,
+
+      "Background Color": {
+        "Red Component": 0.1020, "Green Component": 0.1059, "Blue Component": 0.1490, "Alpha Component": 1
+      },
+      "Foreground Color": {
+        "Red Component": 0.7529, "Green Component": 0.7922, "Blue Component": 0.9608, "Alpha Component": 1
+      },
+      "Selection Color": {
+        "Red Component": 0.1569, "Green Component": 0.2039, "Blue Component": 0.3412, "Alpha Component": 1
+      },
+      "Selected Text Color": {
+        "Red Component": 0.7529, "Green Component": 0.7922, "Blue Component": 0.9608, "Alpha Component": 1
+      },
+      "Cursor Color": {
+        "Red Component": 0.7529, "Green Component": 0.7922, "Blue Component": 0.9608, "Alpha Component": 1
+      },
+      "Cursor Text Color": {
+        "Red Component": 0.1020, "Green Component": 0.1059, "Blue Component": 0.1490, "Alpha Component": 1
+      },
+      "Link Color": {
+        "Red Component": 0.4510, "Green Component": 0.8549, "Blue Component": 0.7922, "Alpha Component": 1
+      },
+
+      "Ansi 0 Color":  { "Red Component": 0.0824, "Green Component": 0.0863, "Blue Component": 0.1176, "Alpha Component": 1 },
+      "Ansi 1 Color":  { "Red Component": 0.9686, "Green Component": 0.4627, "Blue Component": 0.5569, "Alpha Component": 1 },
+      "Ansi 2 Color":  { "Red Component": 0.6196, "Green Component": 0.8078, "Blue Component": 0.4157, "Alpha Component": 1 },
+      "Ansi 3 Color":  { "Red Component": 0.8784, "Green Component": 0.6863, "Blue Component": 0.4078, "Alpha Component": 1 },
+      "Ansi 4 Color":  { "Red Component": 0.4784, "Green Component": 0.6353, "Blue Component": 0.9686, "Alpha Component": 1 },
+      "Ansi 5 Color":  { "Red Component": 0.7333, "Green Component": 0.6039, "Blue Component": 0.9686, "Alpha Component": 1 },
+      "Ansi 6 Color":  { "Red Component": 0.4902, "Green Component": 0.8118, "Blue Component": 1.0000, "Alpha Component": 1 },
+      "Ansi 7 Color":  { "Red Component": 0.6627, "Green Component": 0.6941, "Blue Component": 0.8392, "Alpha Component": 1 },
+      "Ansi 8 Color":  { "Red Component": 0.2549, "Green Component": 0.2824, "Blue Component": 0.4078, "Alpha Component": 1 },
+      "Ansi 9 Color":  { "Red Component": 0.9686, "Green Component": 0.4627, "Blue Component": 0.5569, "Alpha Component": 1 },
+      "Ansi 10 Color": { "Red Component": 0.6196, "Green Component": 0.8078, "Blue Component": 0.4157, "Alpha Component": 1 },
+      "Ansi 11 Color": { "Red Component": 0.8784, "Green Component": 0.6863, "Blue Component": 0.4078, "Alpha Component": 1 },
+      "Ansi 12 Color": { "Red Component": 0.4784, "Green Component": 0.6353, "Blue Component": 0.9686, "Alpha Component": 1 },
+      "Ansi 13 Color": { "Red Component": 0.7333, "Green Component": 0.6039, "Blue Component": 0.9686, "Alpha Component": 1 },
+      "Ansi 14 Color": { "Red Component": 0.4902, "Green Component": 0.8118, "Blue Component": 1.0000, "Alpha Component": 1 },
+      "Ansi 15 Color": { "Red Component": 0.7529, "Green Component": 0.7922, "Blue Component": 0.9608, "Alpha Component": 1 }
+    }
+  ]
+}
