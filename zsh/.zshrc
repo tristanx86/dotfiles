@@ -170,6 +170,7 @@ function helpdot() { _renderdot MAIN_cmds.md; }      # main cheat sheet
 function termdot() { _renderdot terminal_cmds.md; }  # terminal cmds I forget
 function perfdot() { _renderdot perf_cmds.md; }      # perf / measurement cmds
 function hostdot() { _renderdot host_cmds.md; }      # host / ssh management cmds
+function flooddot() { _renderdot flood_cmds.md; }    # floodfd load-gen cmds
 
 # updatedot: pull the latest dotfiles, re-run install.sh, reload the shell.
 function updatedot() {
@@ -177,9 +178,9 @@ function updatedot() {
 }
 
 # ── Firedancer Development ───────────────────────────
-# Firedancer build/run, config management, and pktgen tooling live in sibling
-# files next to this one in the repo (DOTFILES_ZSH_DIR resolved near the top).
-for _f in firedancer firedancer-config firedancer-pktgen; do
+# Firedancer build/run, config management, and pktgen/flood tooling live in
+# sibling files next to this one in the repo (DOTFILES_ZSH_DIR resolved near the top).
+for _f in firedancer firedancer-config firedancer-pktgen firedancer-flood; do
     [ -r "$DOTFILES_ZSH_DIR/$_f.zsh" ] && source "$DOTFILES_ZSH_DIR/$_f.zsh"
 done
 unset _f

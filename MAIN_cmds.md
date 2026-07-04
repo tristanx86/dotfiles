@@ -35,6 +35,7 @@
 | `termdot` | Terminal cmds I forget. |
 | `perfdot` | Perf / measurement cmds. |
 | `hostdot` | Host / SSH management cmds (`s`/`sfd`). |
+| `flooddot` | Flood load-gen cmds (`floodfd`). |
 | `updatedot` | Pull dotfiles, re-run `install.sh`, reload shell. |
 
 ## Navigation
