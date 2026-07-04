@@ -11,8 +11,7 @@
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
 | `devfd` / `pktfd` | Run the binary's `dev` / `pktgen` with `~/config.toml`. |
 | `testnetfd` | Run the binary with `--testnet --config`. |
-| `pktfd ifs [fd pgif]` | Select (or display) which NICs firedancer and pktgen use. |
-| `pktfd setup` | Configure firedancer NIC route/ARP + optional DPDK pktgen on the pktgen NIC. |
+| `pktfd setup` | Configure firedancer NIC route/ARP + optional DPDK pktgen; prompts for NICs as needed. |
 | `pktfd restore` | Undo `setup`'s vfio-pci bind — return the pktgen NIC to its kernel driver. |
 | `flamefd` | Capture a `perf` flamegraph. |
 | `metricsfd` | Print Prometheus metrics. |
@@ -20,6 +19,9 @@
 | `initfd` | `configure init all` with active config. |
 | `finifd` | `configure fini all` with active config. |
 | `relmemfd` | Release 2MB & 1GB hugepages. |
+
+| cfd cmds | |
+| :--- | :--- |
 | `cfd` | Edit active config. |
 | `cfd new <name>` | Create config (seeded from active) and switch. |
 | `cfd ls` | List configs; `*` marks active. |

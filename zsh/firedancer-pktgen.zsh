@@ -3,7 +3,10 @@
 # loopback test rig. Relies on _fdbin/_fdbinpath/_fdconfig from firedancer.zsh
 # and firedancer-config.zsh.
 #
-# Use `pktfd ifs` to configure which NICs to use (saved per-machine, untracked).
+# `pktfd setup` prompts for each NIC only when it's actually needed: the
+# firedancer NIC up front, the DPDK pktgen NIC only after you've said you
+# want to start pktgen. Picks are saved per-machine (untracked) — Enter
+# keeps the last one.
 
 # DPDK's "main" lcore runs control/CLI and generates no traffic; pktgen also
 # needs one core to service RX. Every remaining core is a dedicated TX
@@ -16,72 +19,49 @@
 PKTFD_IFACES_FILE="$HOME/.config/dotfiles/pktfd-ifaces"
 _pktfd_fdif() { grep '^fdif=' "$PKTFD_IFACES_FILE" 2>/dev/null | cut -d= -f2-; }
 _pktfd_pgif() { grep '^pgif=' "$PKTFD_IFACES_FILE" 2>/dev/null | cut -d= -f2-; }
+_pktfd_setif() {
+    local key=$1 val=$2
+    mkdir -p "$(dirname "$PKTFD_IFACES_FILE")"
+    local fd=$(_pktfd_fdif) pg=$(_pktfd_pgif)
+    [ "$key" = fdif ] && fd=$val
+    [ "$key" = pgif ] && pg=$val
+    printf 'fdif=%s\npgif=%s\n' "$fd" "$pg" > "$PKTFD_IFACES_FILE"
+}
 
 function pktfd() {
     if [ "$1" = setup ];   then shift; _pktfd_setup "$@";   return; fi
     if [ "$1" = restore ]; then shift; _pktfd_restore "$@"; return; fi
-    if [ "$1" = ifs ];     then shift; _pktfd_ifs "$@";     return; fi
     sudo "$(_fdbinpath)" pktgen --config "$(_fdconfig)"
 }
 
-# pktfd ifs [fdif pgif]: select (or display) the firedancer and pktgen interfaces.
-# With no args: interactive selection from a numbered list.
-# With two args: direct assignment — pktfd ifs <fdif> <pgif>.
-function _pktfd_ifs() {
-    mkdir -p "$(dirname "$PKTFD_IFACES_FILE")"
-
-    if [ $# -eq 2 ]; then
-        printf 'fdif=%s\npgif=%s\n' "$1" "$2" > "$PKTFD_IFACES_FILE"
-        echo "pktfd interfaces: firedancer=$1  pktgen=$2"
-        return 0
-    fi
-
-    local cur_fd cur_pg ans
-    cur_fd=$(_pktfd_fdif)
-    cur_pg=$(_pktfd_pgif)
-
-    if [ -n "$cur_fd" ] && [ -n "$cur_pg" ]; then
-        echo "Current pktfd interfaces: firedancer=$cur_fd  pktgen=$cur_pg"
-        read "ans?Change? [y/N] "
-        case "$ans" in y|Y|yes|Yes) ;; *) return 0 ;; esac
-    fi
-
+# _pktfd_pick <label> [current]: list network interfaces and prompt for one,
+# printing the choice to stdout. Enter keeps [current] if given.
+function _pktfd_pick() {
+    local label=$1 cur=$2
     local ifaces=() i idx=1 drv
-    echo "Available interfaces:"
+    echo "Available interfaces:" >&2
     for i in /sys/class/net/*(N); do
         i=${i##*/}
         [ "$i" = lo ] && continue
         drv=$(basename "$(readlink -f /sys/class/net/$i/device/driver 2>/dev/null)" 2>/dev/null)
         ifaces+=("$i")
-        printf "  %d) %-20s %s\n" "$idx" "$i" "${drv:+driver: $drv}"
+        printf "  %d) %-20s %s\n" "$idx" "$i" "${drv:+driver: $drv}" >&2
         idx=$((idx + 1))
     done
-    [ ${#ifaces} -eq 0 ] && { echo "pktfd ifs: no network interfaces found."; return 1; }
+    [ ${#ifaces} -eq 0 ] && { echo "pktfd: no network interfaces found." >&2; return 1; }
 
-    local sel fdif="$cur_fd" pgif="$cur_pg"
-
-    read "sel?Firedancer NIC${cur_fd:+ (Enter = keep '$cur_fd')} [1-${#ifaces}]: "
-    if [ -n "$sel" ]; then
-        if ! [[ "$sel" =~ '^[0-9]+$' ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt ${#ifaces} ]; then
-            echo "pktfd ifs: invalid selection '$sel'."
-            return 1
-        fi
-        fdif=${ifaces[$sel]}
+    local sel
+    read "sel?${label}${cur:+ (Enter = keep '$cur')} [1-${#ifaces}]: "
+    if [ -z "$sel" ]; then
+        [ -z "$cur" ] && { echo "pktfd: no interface selected." >&2; return 1; }
+        echo "$cur"
+        return 0
     fi
-    [ -z "$fdif" ] && { echo "pktfd ifs: no firedancer interface selected."; return 1; }
-
-    read "sel?Pktgen NIC${cur_pg:+ (Enter = keep '$cur_pg')} [1-${#ifaces}]: "
-    if [ -n "$sel" ]; then
-        if ! [[ "$sel" =~ '^[0-9]+$' ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt ${#ifaces} ]; then
-            echo "pktfd ifs: invalid selection '$sel'."
-            return 1
-        fi
-        pgif=${ifaces[$sel]}
+    if ! [[ "$sel" =~ '^[0-9]+$' ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt ${#ifaces} ]; then
+        echo "pktfd: invalid selection '$sel'." >&2
+        return 1
     fi
-    [ -z "$pgif" ] && { echo "pktfd ifs: no pktgen interface selected."; return 1; }
-
-    printf 'fdif=%s\npgif=%s\n' "$fdif" "$pgif" > "$PKTFD_IFACES_FILE"
-    echo "pktfd interfaces set: firedancer=$fdif  pktgen=$pgif"
+    echo "${ifaces[$sel]}"
 }
 
 # pktfd setup: point the firedancer NIC at the peer (route + static ARP), then
@@ -89,19 +69,12 @@ function _pktfd_ifs() {
 # any DPDK-supported NIC — Mellanox (mlx5, bifurcated) needs no rebind, while
 # others must be bound to vfio-pci for pktgen.
 function _pktfd_setup() {
-    local fdif pgif
-    fdif=$(_pktfd_fdif)
-    pgif=$(_pktfd_pgif)
-    if [ -z "$fdif" ] || [ -z "$pgif" ]; then
-        echo "pktfd: interfaces not configured — running 'pktfd ifs' first..."
-        echo ""
-        _pktfd_ifs || return 1
-        fdif=$(_pktfd_fdif)
-        pgif=$(_pktfd_pgif)
-    fi
+    local fdif
+    fdif=$(_pktfd_pick "Firedancer NIC" "$(_pktfd_fdif)") || return 1
+    _pktfd_setif fdif "$fdif"
 
     if ! ip link show "$fdif" >/dev/null 2>&1; then
-        echo "pktfd setup: firedancer interface '$fdif' not found. Run 'pktfd ifs' to reconfigure."
+        echo "pktfd setup: firedancer interface '$fdif' not found."
         return 1
     fi
 
@@ -119,11 +92,15 @@ function _pktfd_setup() {
     sudo ip r replace 10.181.80.14 dev "$fdif"
     sudo ip n replace 10.181.80.14 lladdr aa:aa:aa:aa:aa:aa dev "$fdif"
 
-    read "ans?Also start DPDK pktgen on $pgif? [y/N] "
+    read "ans?Also start DPDK pktgen? [y/N] "
     case "$ans" in
         y|Y|yes|Yes) ;;
         *) echo "Done — firedancer $fdif setup only."; return 0 ;;
     esac
+
+    local pgif
+    pgif=$(_pktfd_pick "Pktgen NIC" "$(_pktfd_pgif)") || return 1
+    _pktfd_setif pgif "$pgif"
 
     # How many TX (generation) cores? More cores -> more Mpps, up to NIC line rate.
     local ntx
@@ -154,7 +131,7 @@ function _pktfd_setup() {
     fi
 
     if ! ip link show "$pgif" >/dev/null 2>&1; then
-        echo "pktfd setup: pktgen interface '$pgif' not found. Run 'pktfd ifs' to reconfigure."
+        echo "pktfd setup: pktgen interface '$pgif' not found."
         return 1
     fi
     if ! command -v pktgen >/dev/null 2>&1; then

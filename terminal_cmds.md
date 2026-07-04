@@ -18,6 +18,13 @@
 | `Ctrl g` | Cancel history search. |
 | `Ctrl l` | Clear screen. |
 
+## Paging (man, git show/log/diff, Neovim)
+
+| Keys | Action |
+| :--- | :--- |
+| `Ctrl f` | Page down (one screen). |
+| `Ctrl b` | Page up (one screen). |
+
 ## Power
 
 | Command | Action |
