@@ -7,10 +7,10 @@
 | `s` / `sfd` | SSH to main / secondary dev server. See `hostdot`. |
 | `switchfd [name]` | Pick the firedancer binary `*fd` commands drive. |
 | `makefd` | Build the binary's make target (`fddev` also builds solana). |
-| `pullfd` | `git pull`, submodules, `deps.sh`, build. |
-| `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
+| `updatefd` | Fetch upstream, hard-reset local `main` to `upstream/main`, force-push to `origin main`. |
 | `devfd` / `pktfd` | Run the binary's `dev` / `pktgen` with `~/config.toml`. |
 | `testnetfd` | Run the binary with `--testnet --config`. |
+| `devfd gdb` / `pktfd gdb` / `testnetfd gdb` | Same, but under `gdb --args`. |
 | `pktfd setup` | Configure firedancer NIC route/ARP + optional DPDK pktgen; prompts for NICs as needed. |
 | `pktfd restore` | Undo `setup`'s vfio-pci bind — return the pktgen NIC to its kernel driver. |
 | `flamefd` | Capture a `perf` flamegraph. |

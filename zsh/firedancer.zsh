@@ -26,25 +26,46 @@ function switchfd() {
 # These were aliases historically; drop any stale alias so re-sourcing .zshrc
 # (without a fresh shell) doesn't shadow the functions — an alias would make
 # `pktfd setup` expand to `... pktgen ... setup` instead of running the setup.
-unalias makefd pullfd pktfd devfd testnetfd flamefd metricsfd memfd initfd finifd 2>/dev/null
+unalias makefd updatefd pktfd devfd testnetfd flamefd metricsfd memfd initfd finifd 2>/dev/null
 
 function makefd()    { make -j $(_fdtarget); }
-function pullfd()    { git pull && git submodule update && ./deps.sh && make -j $(_fdtarget); }
-function devfd()     { sudo "$(_fdbinpath)" dev --config "$(_fdconfig)"; }
-function testnetfd() { sudo "$(_fdbinpath)" --testnet --config "$(_fdconfig)"; }
+function devfd() {
+    if [ "$1" = gdb ]; then shift; sudo gdb --args "$(_fdbinpath)" dev --config "$(_fdconfig)" "$@"; return; fi
+    sudo "$(_fdbinpath)" dev --config "$(_fdconfig)"
+}
+function testnetfd() {
+    if [ "$1" = gdb ]; then shift; sudo gdb --args "$(_fdbinpath)" --testnet --config "$(_fdconfig)" "$@"; return; fi
+    sudo "$(_fdbinpath)" --testnet --config "$(_fdconfig)"
+}
 function flamefd()   { sudo "$(_fdbinpath)" flame --config "$(_fdconfig)"; }    # perf flamegraph
 function metricsfd() { sudo "$(_fdbinpath)" metrics --config "$(_fdconfig)"; }  # Prometheus metrics
 function memfd()     { sudo "$(_fdbinpath)" mem --config "$(_fdconfig)"; }      # memory usage report
 function initfd()    { sudo "$(_fdbinpath)" configure init all --config "$(_fdconfig)"; }
 function finifd()    { sudo "$(_fdbinpath)" configure fini all --config "$(_fdconfig)"; }
 
-# ── Firedancer Branch Management ─────────────────────
-function branchfd() {
-    if [ -z "$1" ]; then
-        echo "Usage: branchfd <branch-name>"
+# ── Firedancer Fork Sync ──────────────────────────────
+# updatefd: sync local + origin main to upstream's main. Only ever touches
+# main — refuses to run with any uncommitted/staged changes (regardless of
+# which branch they're on), and switches back to your original branch after,
+# so whatever you were working on is left untouched.
+function updatefd() {
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "updatefd: working tree has uncommitted changes — commit or stash first."
         return 1
     fi
-    git pull
-    git checkout -b "$1" "tristan/tristanx86/$1" || { echo "Error: Branch checkout failed. Make sure the remote branch exists."; return 1; }
-    make -j $(_fdtarget)
+    local ans
+    read "ans?Force-sync main to upstream? [Y/n] "
+    case "$ans" in n|N|no|No) echo "Aborted."; return 1;; esac
+
+    local cur
+    cur=$(git branch --show-current)
+    git fetch upstream || return 1
+    git checkout main || return 1
+    git reset --hard upstream/main || return 1
+    git push --force origin main
+    local status=$?
+    if [ -n "$cur" ] && [ "$cur" != main ]; then
+        git checkout "$cur"
+    fi
+    return $status
 }
