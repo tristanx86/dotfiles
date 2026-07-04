@@ -12,16 +12,16 @@ _fdconfig() {
     fi
 }
 
-# cfgfd: create / list / delete / switch firedancer config files.
-function cfgfd() {
+# cfd: create / list / delete / switch firedancer config files.
+function cfd() {
     mkdir -p "$FD_CONFIG_DIR"
     local cmd="$1"; (( $# )) && shift
     local current; current=$(cat "$FD_CONFIG_FILE" 2>/dev/null)
     case "$cmd" in
         new)
-            [ -z "$1" ] && { echo "Usage: cfgfd new <name>"; return 1; }
+            [ -z "$1" ] && { echo "Usage: cfd new <name>"; return 1; }
             local dest="$FD_CONFIG_DIR/$1.toml"
-            [ -e "$dest" ] && { echo "cfgfd: config '$1' already exists"; return 1; }
+            [ -e "$dest" ] && { echo "cfd: config '$1' already exists"; return 1; }
             if [ -f "$(_fdconfig)" ]; then cp "$(_fdconfig)" "$dest"; else touch "$dest"; fi
             echo "$1" > "$FD_CONFIG_FILE"
             echo "Created and switched to config: $1 ($dest)"
@@ -33,11 +33,11 @@ function cfgfd() {
                 found=1; n="${f:t:r}"
                 [ "$n" = "$current" ] && echo "* $n (active)" || echo "  $n"
             done
-            (( found )) || echo "No configs yet. Create one with 'cfgfd new <name>'."
+            (( found )) || echo "No configs yet. Create one with 'cfd new <name>'."
             ;;
         rm)
-            [ -z "$1" ] && { echo "Usage: cfgfd rm <name>"; return 1; }
-            [ -f "$FD_CONFIG_DIR/$1.toml" ] || { echo "cfgfd: no config named '$1'"; return 1; }
+            [ -z "$1" ] && { echo "Usage: cfd rm <name>"; return 1; }
+            [ -f "$FD_CONFIG_DIR/$1.toml" ] || { echo "cfd: no config named '$1'"; return 1; }
             rm "$FD_CONFIG_DIR/$1.toml"
             [ "$current" = "$1" ] && rm -f "$FD_CONFIG_FILE"   # fall back to ~/config.toml
             echo "Deleted config: $1"
@@ -49,7 +49,7 @@ function cfgfd() {
             echo "Active config: $(_fdconfig)"
             ;;
         *)
-            [ -f "$FD_CONFIG_DIR/$cmd.toml" ] || { echo "cfgfd: no config named '$cmd'. Run 'cfgfd ls'."; return 1; }
+            [ -f "$FD_CONFIG_DIR/$cmd.toml" ] || { echo "cfd: no config named '$cmd'. Run 'cfd ls'."; return 1; }
             echo "$cmd" > "$FD_CONFIG_FILE"
             echo "Switched to config: $cmd ($FD_CONFIG_DIR/$cmd.toml)"
             ;;

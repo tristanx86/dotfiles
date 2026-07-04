@@ -4,30 +4,35 @@
 
 | Command | Action |
 | :--- | :--- |
-| `s [user@host]` | SSH to saved server; pass `user@host` once to set it. |
+| `s` / `sfd` | SSH to main / secondary dev server. See `hostdot`. |
 | `switchfd [name]` | Pick the firedancer binary `*fd` commands drive. |
 | `makefd` | Build the binary's make target (`fddev` also builds solana). |
 | `pullfd` | `git pull`, submodules, `deps.sh`, build. |
 | `branchfd <name>` | Pull, checkout `tristan/tristanx86/<name>`, build. |
 | `devfd` / `pktfd` | Run the binary's `dev` / `pktgen` with `~/config.toml`. |
+| `testnetfd` | Run the binary with `--testnet --config`. |
 | `pktfd ifs [fd pgif]` | Select (or display) which NICs firedancer and pktgen use. |
 | `pktfd setup` | Configure firedancer NIC route/ARP + optional DPDK pktgen on the pktgen NIC. |
 | `pktfd restore` | Undo `setup`'s vfio-pci bind — return the pktgen NIC to its kernel driver. |
 | `flamefd` | Capture a `perf` flamegraph. |
 | `metricsfd` | Print Prometheus metrics. |
+| `memfd` | Print the binary's memory usage report. |
+| `initfd` | `configure init all` with active config. |
+| `finifd` | `configure fini all` with active config. |
 | `relmemfd` | Release 2MB & 1GB hugepages. |
-| `cfgfd` | Edit active config. |
-| `cfgfd new <name>` | Create config (seeded from active) and switch. |
-| `cfgfd ls` | List configs; `*` marks active. |
-| `cfgfd <name>` | Switch active config. |
-| `cfgfd rm <name>` | Delete a config. |
-| `cfgfd path` | Print active config path. |
+| `cfd` | Edit active config. |
+| `cfd new <name>` | Create config (seeded from active) and switch. |
+| `cfd ls` | List configs; `*` marks active. |
+| `cfd <name>` | Switch active config. |
+| `cfd rm <name>` | Delete a config. |
+| `cfd path` | Print active config path. |
 
 | dot cmds | |
 | :--- | :--- |
 | `helpdot` | This main cheat sheet. |
 | `termdot` | Terminal cmds I forget. |
 | `perfdot` | Perf / measurement cmds. |
+| `hostdot` | Host / SSH management cmds (`s`/`sfd`). |
 | `updatedot` | Pull dotfiles, re-run `install.sh`, reload shell. |
 
 ## Navigation
@@ -57,7 +62,6 @@ Inside a session:
 | `Prefix z` | Zoom pane. |
 | `Prefix c` / `d` | New window / detach. |
 | `Prefix r` | Reload config. |
-| `Prefix Ctrl-s` / `Ctrl-r` | Save / restore sessions. |
 | `Cmd Enter` / `Cmd T` | New Kitty window / tab. |
 
 ## Neovim

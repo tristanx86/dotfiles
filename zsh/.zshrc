@@ -15,6 +15,9 @@ else
 fi
 
 OS="$(uname -s)"
+# Resolve this file's real directory (it's symlinked into $HOME) so sibling
+# zsh files (hosts, firedancer*) can be sourced regardless of OS.
+DOTFILES_ZSH_DIR="${${(%):-%x}:A:h}"
 
 # ── macOS Configuration ──────────────────────────────
 if [[ "$OS" == "Darwin" ]]; then
@@ -34,43 +37,8 @@ if [[ "$OS" == "Darwin" ]]; then
         unset _brew_prefix
     fi
 
-    # Kitty Terminal Integration
-    # 'kitten ssh' automatically propagates terminfo and clipboard capability
-    #
-    # The SSH target is stored per-device in an untracked file so each machine
-    # can point 's' at a different server without editing the dotfiles.
-    #   s                connect to the saved server
-    #   s user@host      connect to user@host and save it as the new default
-    FD_SERVER_FILE="$HOME/.config/dotfiles/server"
-
-    function s() {
-        if [ -n "$1" ]; then
-            mkdir -p "$(dirname "$FD_SERVER_FILE")"
-            echo "$1" > "$FD_SERVER_FILE"
-        fi
-        if [ ! -s "$FD_SERVER_FILE" ]; then
-            echo "No server set. Usage: s user@host (saved for next time)"
-            return 1
-        fi
-        local server; server="$(cat "$FD_SERVER_FILE")"
-        # kitten ssh propagates terminfo + OSC 52 clipboard; only available in Kitty.
-        if [[ "$TERM_PROGRAM" == "kitty" ]]; then
-            kitty +kitten ssh "$server"
-        else
-            ssh "$server"
-        fi
-    }
-
-    # Mosh Integration (Optional: requires 'brew install mosh')
-    # Uses the same saved server as 's'.
-    function m() {
-        if [ ! -s "$FD_SERVER_FILE" ]; then
-            echo "No server set. Run 's user@host' first to save one."
-            return 1
-        fi
-        local server; server="$(cat "$FD_SERVER_FILE")"
-        mosh "$server"
-    }
+    # Host / SSH management ('s'/'m'/'sfd') lives in hosts.zsh — see that file.
+    [ -r "$DOTFILES_ZSH_DIR/hosts.zsh" ] && source "$DOTFILES_ZSH_DIR/hosts.zsh"
 
 # ── Linux Configuration (Dell/Razer) ─────────────────
 elif [[ "$OS" == "Linux" ]]; then
@@ -123,32 +91,18 @@ alias gl='git log --oneline --graph --decorate'
 alias gd='git diff'
 
 # ── Tmux ─────────────────────────────────────────────
-# continuum auto-saves every 5 min; with @continuum-restore 'on' it restores the
-# saved sessions when the tmux server first starts after a reboot. A freshly
-# started *empty* server exits before that background restore lands, so _tmux_boot
-# anchors it with a throwaway session, waits for a restored one to appear, then
-# drops the holder. tl/ta cold-start through this; tn/tk stay plain (so once the
-# server is up, tn gives a fresh session and tk stays killed).
-function _tmux_boot() {
-    tmux ls >/dev/null 2>&1 && return                  # server already up — nothing to do
-    tmux new-session -d -s _boot 2>/dev/null || return # holder keeps the new server alive
-    for _ in {1..25}; do                               # up to ~5s for continuum to restore
-        tmux ls 2>/dev/null | grep -qv '^_boot:' && break
-        sleep 0.2
-    done
-    tmux kill-session -t _boot 2>/dev/null             # drop holder (leaves the restored set)
-}
-function tl() { _tmux_boot; tmux ls 2>/dev/null || echo "no tmux sessions"; }   # list sessions
-function ta() {                                                                 # attach (last if omitted)
-    _tmux_boot
+# Plain wrappers around tmux — no custom session-juggling, so tmux's own
+# behavior is always what you get.
+function tl() { tmux ls 2>/dev/null || echo "no tmux sessions"; }   # list sessions
+function ta() {                                                     # attach (last if omitted)
     if [ -n "$1" ]; then
         tmux attach -t "$1" 2>/dev/null || tmux new -s "$1"
     else
         tmux attach 2>/dev/null || tmux new
     fi
 }
-alias tn='tmux new -s'                  # tn <name>  — new session
-alias tk='tmux kill-session -t'         # tk <name>  — kill session
+function tn() { tmux new -s "$1"; }              # tn <name>  — new session
+function tk() { tmux kill-session -t "$1"; }     # tk <name>  — kill session
 
 # fdwork: ultrawide dev window in the CURRENT session. Layout (left -> right):
 #   tree | code1 (67%) / cmd (33%) | code2 | [ cmd / cmd / htop ]
@@ -215,6 +169,7 @@ function _renderdot() {
 function helpdot() { _renderdot MAIN_cmds.md; }      # main cheat sheet
 function termdot() { _renderdot terminal_cmds.md; }  # terminal cmds I forget
 function perfdot() { _renderdot perf_cmds.md; }      # perf / measurement cmds
+function hostdot() { _renderdot host_cmds.md; }      # host / ssh management cmds
 
 # updatedot: pull the latest dotfiles, re-run install.sh, reload the shell.
 function updatedot() {
@@ -223,9 +178,7 @@ function updatedot() {
 
 # ── Firedancer Development ───────────────────────────
 # Firedancer build/run, config management, and pktgen tooling live in sibling
-# files next to this one in the repo. Resolve this file's real directory (it's
-# symlinked into $HOME) and source them.
-DOTFILES_ZSH_DIR="${${(%):-%x}:A:h}"
+# files next to this one in the repo (DOTFILES_ZSH_DIR resolved near the top).
 for _f in firedancer firedancer-config firedancer-pktgen; do
     [ -r "$DOTFILES_ZSH_DIR/$_f.zsh" ] && source "$DOTFILES_ZSH_DIR/$_f.zsh"
 done

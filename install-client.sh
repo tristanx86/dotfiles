@@ -8,7 +8,7 @@
 #   - tmux config (if tmux is installed)
 #   - nvim config (if nvim is installed)
 #   - iTerm2 TokyoNight profile + default profile + clipboard access
-#   - The `s` / `m` functions for connecting to your dev server
+#   - The `s` / `sfd` functions for connecting to your dev servers
 #
 # Run on the server itself:  bash ~/dotfiles/install.sh
 

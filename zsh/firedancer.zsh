@@ -26,13 +26,17 @@ function switchfd() {
 # These were aliases historically; drop any stale alias so re-sourcing .zshrc
 # (without a fresh shell) doesn't shadow the functions — an alias would make
 # `pktfd setup` expand to `... pktgen ... setup` instead of running the setup.
-unalias makefd pullfd pktfd devfd flamefd metricsfd 2>/dev/null
+unalias makefd pullfd pktfd devfd testnetfd flamefd metricsfd memfd initfd finifd 2>/dev/null
 
 function makefd()    { make -j $(_fdtarget); }
 function pullfd()    { git pull && git submodule update && ./deps.sh && make -j $(_fdtarget); }
 function devfd()     { sudo "$(_fdbinpath)" dev --config "$(_fdconfig)"; }
+function testnetfd() { sudo "$(_fdbinpath)" --testnet --config "$(_fdconfig)"; }
 function flamefd()   { sudo "$(_fdbinpath)" flame --config "$(_fdconfig)"; }    # perf flamegraph
 function metricsfd() { sudo "$(_fdbinpath)" metrics --config "$(_fdconfig)"; }  # Prometheus metrics
+function memfd()     { sudo "$(_fdbinpath)" mem --config "$(_fdconfig)"; }      # memory usage report
+function initfd()    { sudo "$(_fdbinpath)" configure init all --config "$(_fdconfig)"; }
+function finifd()    { sudo "$(_fdbinpath)" configure fini all --config "$(_fdconfig)"; }
 
 # ── Firedancer Branch Management ─────────────────────
 function branchfd() {

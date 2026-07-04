@@ -17,3 +17,13 @@ Copy and paste this one-liner into your terminal to clone (or update) the reposi
 ```bash
 git clone https://github.com/tristanx86/dotfiles.git ~/dotfiles 2>/dev/null || (cd ~/dotfiles && git fetch && git reset --hard origin/main) && chmod +x ~/dotfiles/install.sh && ~/dotfiles/install.sh && exec zsh
 ```
+
+## Reduced / client setup
+
+For a restricted machine. `install-client.sh` never uses `sudo` — it's
+mainly for setting up the terminal and host/SSH management (`s`/`sfd`, see
+`host_cmds.md` / `hostdot`).
+
+```bash
+git clone https://github.com/tristanx86/dotfiles.git ~/dotfiles 2>/dev/null || (cd ~/dotfiles && git fetch && git reset --hard origin/main) && chmod +x ~/dotfiles/install-client.sh && ~/dotfiles/install-client.sh && exec zsh
+```
