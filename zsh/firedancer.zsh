@@ -30,11 +30,11 @@ unalias makefd updatefd pktfd devfd testnetfd flamefd metricsfd memfd initfd fin
 
 function makefd()    { make -j $(_fdtarget); }
 function devfd() {
-    if [ "$1" = gdb ]; then shift; sudo gdb --args "$(_fdbinpath)" dev --config "$(_fdconfig)" "$@"; return; fi
+    if [ "$1" = gdb ]; then shift; sudo gdb -q --args "$(_fdbinpath)" dev --config "$(_fdconfig)" "$@"; return; fi
     sudo "$(_fdbinpath)" dev --config "$(_fdconfig)"
 }
 function testnetfd() {
-    if [ "$1" = gdb ]; then shift; sudo gdb --args "$(_fdbinpath)" --testnet --config "$(_fdconfig)" "$@"; return; fi
+    if [ "$1" = gdb ]; then shift; sudo gdb -q --args "$(_fdbinpath)" --testnet --config "$(_fdconfig)" "$@"; return; fi
     sudo "$(_fdbinpath)" --testnet --config "$(_fdconfig)"
 }
 function flamefd()   { sudo "$(_fdbinpath)" flame --config "$(_fdconfig)"; }    # perf flamegraph

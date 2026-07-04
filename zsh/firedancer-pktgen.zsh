@@ -31,7 +31,7 @@ _pktfd_setif() {
 function pktfd() {
     if [ "$1" = setup ];   then shift; _pktfd_setup "$@";   return; fi
     if [ "$1" = restore ]; then shift; _pktfd_restore "$@"; return; fi
-    if [ "$1" = gdb ];     then shift; sudo gdb --args "$(_fdbinpath)" pktgen --config "$(_fdconfig)" "$@"; return; fi
+    if [ "$1" = gdb ];     then shift; sudo gdb -q --args "$(_fdbinpath)" pktgen --config "$(_fdconfig)" "$@"; return; fi
     sudo "$(_fdbinpath)" pktgen --config "$(_fdconfig)"
 }
 
