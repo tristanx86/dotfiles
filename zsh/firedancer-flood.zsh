@@ -225,6 +225,76 @@ function _floodfd_stop() {
     echo "Kernel pktgen stopped."
 }
 
+# _floodfd_ensure_dpdk: install DPDK + build Pktgen-DPDK from source if the
+# 'pktgen' binary isn't on PATH. DPDK's dev packages are in standard distro
+# repos, but Pktgen-DPDK itself normally isn't, so it's built from source
+# into ~/.local/src (no root needed for the clone/build, only the final
+# 'ninja install').
+PKTGEN_SRC_DIR="$HOME/.local/src/pktgen-dpdk"
+function _floodfd_ensure_dpdk() {
+    command -v pktgen >/dev/null 2>&1 && return 0
+
+    echo "floodfd dpdk: 'pktgen' not found on PATH."
+    echo "  This installs DPDK's dev packages via the system package manager,"
+    echo "  then clones + builds Pktgen-DPDK from source into $PKTGEN_SRC_DIR."
+    local ans
+    read "ans?Proceed? [y/N] "
+    case "$ans" in
+        y|Y|yes|Yes) ;;
+        *) echo "Aborted — install pktgen manually, or re-run to retry."; return 1 ;;
+    esac
+
+    local pkgmgr
+    if command -v apt-get >/dev/null 2>&1; then
+        pkgmgr=apt
+    elif command -v dnf >/dev/null 2>&1; then
+        pkgmgr=dnf
+    elif command -v yum >/dev/null 2>&1; then
+        pkgmgr=yum
+    else
+        echo "floodfd dpdk: no supported package manager found (apt-get/dnf/yum) — install DPDK + Pktgen-DPDK manually."
+        return 1
+    fi
+
+    echo "Installing DPDK + build dependencies ($pkgmgr)..."
+    case "$pkgmgr" in
+        apt)
+            sudo apt-get update -y
+            sudo apt-get install -y dpdk dpdk-dev meson ninja-build pkg-config libnuma-dev git \
+                || { echo "floodfd dpdk: package install failed — install DPDK manually and re-run."; return 1; }
+            ;;
+        dnf|yum)
+            sudo "$pkgmgr" install -y dpdk dpdk-devel meson ninja-build pkgconf-pkg-config numactl-devel git \
+                || { echo "floodfd dpdk: package install failed — install DPDK manually and re-run."; return 1; }
+            ;;
+    esac
+
+    mkdir -p "$(dirname "$PKTGEN_SRC_DIR")"
+    if [ -d "$PKTGEN_SRC_DIR/.git" ]; then
+        echo "Updating existing Pktgen-DPDK checkout..."
+        git -C "$PKTGEN_SRC_DIR" pull || return 1
+    else
+        echo "Cloning Pktgen-DPDK..."
+        git clone https://github.com/pktgen/Pktgen-DPDK.git "$PKTGEN_SRC_DIR" || return 1
+    fi
+
+    echo "Building Pktgen-DPDK (meson + ninja)..."
+    (
+        cd "$PKTGEN_SRC_DIR" || exit 1
+        rm -rf build
+        meson setup build || exit 1
+        ninja -C build || exit 1
+        sudo ninja -C build install || exit 1
+    ) || { echo "floodfd dpdk: build failed — see output above."; return 1; }
+    sudo ldconfig
+
+    if ! command -v pktgen >/dev/null 2>&1; then
+        echo "floodfd dpdk: built successfully but 'pktgen' still not on PATH — check /usr/local/bin is in PATH."
+        return 1
+    fi
+    echo "pktgen installed: $(command -v pktgen)"
+}
+
 # floodfd dpdk: bind the flood NIC to vfio-pci (skipped for Mellanox) and
 # launch DPDK pktgen aimed at the saved target. Same core-layout convention
 # as pktfd: main lcore highest, then RX, then TX cores going down — DPDK's
@@ -268,10 +338,7 @@ function _floodfd_dpdk() {
         return 1
     fi
 
-    if ! command -v pktgen >/dev/null 2>&1; then
-        echo "floodfd dpdk: WARNING — DPDK/pktgen does not appear to be installed."
-        return 1
-    fi
+    _floodfd_ensure_dpdk || return 1
     if [ ! -e "/sys/class/net/$iface" ]; then
         echo "floodfd dpdk: no netdev for '$iface' — already bound to vfio-pci from a previous run? Check 'floodfd restore'."
         return 1
