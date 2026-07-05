@@ -84,7 +84,10 @@ function testnetfd() {
 }
 function flamefd()   { _fd_dispatch "$1" sudo "$(_fdbinpath)" flame --config "$(_fdconfig)"; }    # perf flamegraph
 function metricsfd() { _fd_dispatch "$1" sudo "$(_fdbinpath)" metrics --config "$(_fdconfig)"; }  # Prometheus metrics
-function memfd()     { _fd_dispatch "$1" sudo "$(_fdbinpath)" mem --config "$(_fdconfig)"; }      # memory usage report
+function memfd() {
+    if [ "$1" = cmd ]; then _fd_show sudo "$(_fdbinpath)" mem --config "$(_fdconfig)"; return; fi
+    sudo "$(_fdbinpath)" mem --config "$(_fdconfig)" | less
+}
 function initfd()    { _fd_dispatch "$1" sudo "$(_fdbinpath)" configure init all --config "$(_fdconfig)"; }
 function finifd()    { _fd_dispatch "$1" sudo "$(_fdbinpath)" configure fini all --config "$(_fdconfig)"; }
 

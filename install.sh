@@ -447,7 +447,7 @@ if command -v nvim >/dev/null 2>&1; then
     [ -f "$LOCK_FILE" ] && LOCK_HASH="$(_sha256 "$LOCK_FILE")"
     if [ "$NVIM_VER_CHANGED" = 1 ] || [ ! -d "$NVIM_DATA_DIR/lazy" ] || [ "$LOCK_HASH" != "$(cat "$LOCK_STAMP" 2>/dev/null)" ]; then
         echo "[Neovim] Syncing plugins to lockfile..."
-        nvim --headless "+Lazy! restore" +qa 2>/dev/null
+        yes '' | nvim --headless "+Lazy! restore" +qa 2>/dev/null
         echo "$LOCK_HASH" > "$LOCK_STAMP"
     else
         echo "[Neovim] Plugins already match the lockfile — skipping Lazy restore."
@@ -459,7 +459,7 @@ if command -v nvim >/dev/null 2>&1; then
     done
     if [ "$NVIM_VER_CHANGED" = 1 ] || [ "$TS_MISSING" = 1 ]; then
         echo "[Neovim] Building treesitter parsers..."
-        nvim --headless "+lua require('nvim-treesitter').install({'c','cpp','lua','rust','python','bash'}):wait(300000)" +qa 2>/dev/null \
+        yes '' | nvim --headless "+lua require('nvim-treesitter').install({'c','cpp','lua','rust','python','bash'}):wait(300000)" +qa 2>/dev/null \
             || echo "[WARNING] treesitter parser build failed; open nvim and run :TSUpdate."
     else
         echo "[Neovim] Treesitter parsers already installed — skipping build."
