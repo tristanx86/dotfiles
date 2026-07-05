@@ -10,6 +10,66 @@ DOTFILES_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 OS="$(uname -s)"
 FONT_DIR="$HOME/.local/share/fonts"
 
+# Where we cache cheap "did this already happen recently" markers so re-runs
+# (updatedot) don't redo expensive network-bound work every single time.
+STATE_DIR="$HOME/.cache/dotfiles"
+mkdir -p "$STATE_DIR"
+
+# _sha256 <file>: portable hash (Linux has sha256sum, macOS has shasum).
+_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        cksum "$1" | awk '{print $1}'
+    fi
+}
+
+# _apt_update_if_stale <max_age_hours>: `apt-get update` hits every configured
+# mirror over the network, so only do it if the lists are actually old enough
+# to matter — updatedot re-running this daily shouldn't re-fetch them every time.
+_apt_update_if_stale() {
+    local max_age_hours=$1 stamp="$STATE_DIR/apt-update-stamp"
+    if [ -f "$stamp" ]; then
+        local age_h=$(( ($(date +%s) - $(stat -c %Y "$stamp")) / 3600 ))
+        if [ "$age_h" -lt "$max_age_hours" ]; then
+            echo "  (package lists refreshed ${age_h}h ago, < ${max_age_hours}h — skipping apt-get update)"
+            return 0
+        fi
+    fi
+    sudo apt-get update -y && touch "$stamp"
+}
+
+# _bg_run <name> <func>: run <func> (no args) in the background, capturing its
+# output to a per-job log, so independent installs with no shared state
+# (network fetches, git clones) can happen concurrently instead of one at a
+# time. Never use this for anything touching apt/dnf/yum — package managers
+# take an exclusive lock, so "parallel" calls there just serialize anyway
+# while adding a new way to fail.
+BG_PIDS=() BG_NAMES=() BG_LOGS=()
+_bg_run() {
+    local name=$1 log="$STATE_DIR/bg-$1.log"
+    # stdin -> /dev/null: these should all be non-interactive (-y/--unattended),
+    # so if one unexpectedly wants input it fails fast instead of hanging
+    # silently in the background on the terminal's stdin.
+    ( "$1" ) </dev/null >"$log" 2>&1 &
+    BG_PIDS+=("$!"); BG_NAMES+=("$name"); BG_LOGS+=("$log")
+}
+
+# _bg_wait: wait for every _bg_run job queued so far, printing its captured
+# output and flagging failures, then reset the queue.
+_bg_wait() {
+    local i pid name log rc
+    for i in "${!BG_PIDS[@]}"; do
+        pid=${BG_PIDS[$i]}; name=${BG_NAMES[$i]}; log=${BG_LOGS[$i]}
+        wait "$pid"; rc=$?
+        [ -s "$log" ] && cat "$log"
+        [ "$rc" -ne 0 ] && echo "[WARNING] $name failed (exit $rc) — see above."
+    done
+    BG_PIDS=() BG_NAMES=() BG_LOGS=()
+}
+
 echo "==== Initializing Environment Setup ===="
 
 # Ask for the administrator password upfront and keep it alive
@@ -70,7 +130,7 @@ elif [[ "$OS" == "Linux" ]]; then
     # ---- Debian / Ubuntu -----------------------------------------------------
     if [[ "$DISTRO_FAMILY" == "debian" ]]; then
         echo "[Linux/Debian] Updating package lists..."
-        sudo apt-get update -y
+        _apt_update_if_stale 24
 
         echo "[Linux/Debian] Installing System & Dev Dependencies..."
         sudo apt-get install -y build-essential git zsh curl wget unzip tar \
@@ -85,10 +145,14 @@ elif [[ "$OS" == "Linux" ]]; then
             bpftrace bpfcc-tools trace-cmd sysstat \
             || echo "[WARNING] some perf tools unavailable; install manually (see perf_cmds.md)."
 
-        # Install Neovim from unstable PPA
-        echo "[Linux/Debian] Adding Neovim Unstable PPA..."
-        sudo add-apt-repository -y ppa:neovim-ppa/unstable
-        sudo apt-get update -y
+        # Install Neovim from unstable PPA — only add + refresh the repo the
+        # first time; once it's there, apt's normal cache (see
+        # _apt_update_if_stale above) keeps it fresh without a forced update.
+        if ! grep -rq "neovim-ppa/unstable" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+            echo "[Linux/Debian] Adding Neovim Unstable PPA..."
+            sudo add-apt-repository -y ppa:neovim-ppa/unstable
+            sudo apt-get update -y
+        fi
         echo "[Linux/Debian] Installing/Upgrading Neovim..."
         sudo apt-get install -y neovim
 
@@ -153,53 +217,84 @@ elif [[ "$OS" == "Linux" ]]; then
     fi
 
     # ---- Shared Linux (distro-agnostic) --------------------------------------
-
-    # Install Rust if not present
-    if ! command -v cargo &>/dev/null; then
+    # Independent network installs, no shared state between them — run
+    # concurrently instead of one after another.
+    _task_rust() {
+        command -v cargo &>/dev/null && return 0
         echo "[Linux] Installing Rust..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source "$HOME/.cargo/env"
-    fi
-
-    # Install Kitty Terminal
-    if ! command -v kitty &>/dev/null; then
+    }
+    _task_kitty() {
+        command -v kitty &>/dev/null && return 0
         echo "[Linux] Installing Kitty Terminal..."
         curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
         mkdir -p ~/.local/bin
         ln -sf ~/.local/kitty.app/bin/kitty ~/.local/bin/kitty
-    fi
-
-    # Install Nerd Fonts
-    if [[ ! -d "$FONT_DIR/FiraCode" ]]; then
+    }
+    _task_nerdfont() {
+        [[ -d "$FONT_DIR/FiraCode" ]] && return 0
         echo "[Linux] Installing FiraCode Nerd Font..."
         mkdir -p "$FONT_DIR/FiraCode"
-        wget -q --show-progress -P "$FONT_DIR/FiraCode" \
+        wget -q -P "$FONT_DIR/FiraCode" \
             https://github.com/ryanoasis/nerd-fonts/releases/latest/download/FiraCode.zip
         unzip -q "$FONT_DIR/FiraCode/FiraCode.zip" -d "$FONT_DIR/FiraCode"
         rm -f "$FONT_DIR/FiraCode/FiraCode.zip"
-        fc-cache -fv
-    fi
+        fc-cache -f
+    }
+    _bg_run _task_rust
+    _bg_run _task_kitty
+    _bg_run _task_nerdfont
+    _bg_wait
 fi
 
 # -----------------------------------------------------------------------------
-# tree-sitter CLI (required by nvim-treesitter `main` branch to build parsers)
+# tree-sitter CLI, Oh-My-Zsh, Powerlevel10k, TPM
 # -----------------------------------------------------------------------------
-if ! command -v tree-sitter >/dev/null 2>&1; then
+# Four independent installs (npm global package + three git-based installs),
+# none depending on each other — run them concurrently. (The tree-sitter-cli
+# sudo fallback relies on the credential cache from `sudo -v` at the top of
+# this script on Linux; on macOS it's essentially never hit since brew's npm
+# prefix is user-writable.)
+_task_treesitter_cli() {
+    command -v tree-sitter >/dev/null 2>&1 && return 0
     echo "[Neovim] Installing tree-sitter CLI..."
     # Plain install works where the npm prefix is user-writable (brew); fall
     # back to sudo for system prefixes (apt's /usr/local).
     npm install -g tree-sitter-cli 2>/dev/null \
         || sudo npm install -g tree-sitter-cli \
-        || echo "[WARNING] tree-sitter CLI install failed; nvim-treesitter parsers won't build."
-fi
+        || { echo "[WARNING] tree-sitter CLI install failed; nvim-treesitter parsers won't build."; return 1; }
+}
+_task_ohmyzsh() {
+    [ -d "$HOME/.oh-my-zsh" ] && return 0
+    echo "[Shell] Installing Oh-My-Zsh..."
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+}
+_task_p10k() {
+    local dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
+    [ -d "$dir" ] && return 0
+    echo "[Shell] Installing Powerlevel10k Theme..."
+    git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$dir"
+}
+_task_tpm() {
+    local dir="$HOME/.tmux/plugins/tpm"
+    [ -d "$dir" ] && return 0
+    echo "[Tmux] Installing TPM (Tmux Plugin Manager)..."
+    git clone --depth=1 https://github.com/tmux-plugins/tpm "$dir"
+}
+_bg_run _task_treesitter_cli
+_bg_run _task_ohmyzsh
+_bg_run _task_tpm
+_bg_wait
+
+# p10k's target lives *inside* oh-my-zsh's directory tree (custom/themes/...),
+# so it isn't actually independent of _task_ohmyzsh — it has to run after that
+# batch completes, not alongside it (a concurrent clone could leave
+# ~/.oh-my-zsh non-empty right as oh-my-zsh's own clone tries to populate it).
+_task_p10k
 
 # -----------------------------------------------------------------------------
 # Shell Configuration & Symlinking
 # -----------------------------------------------------------------------------
-if [ ! -d "$HOME/.oh-my-zsh" ]; then
-    echo "[Shell] Installing Oh-My-Zsh..."
-    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-fi
 
 # Set zsh as the login shell.
 # chsh may fail on LDAP/managed accounts; we fall back to an exec zsh line in
@@ -215,18 +310,6 @@ if [ -n "$ZSH_BIN" ]; then
     else
         echo "[Shell] chsh failed (managed account?). .bashrc will exec zsh as fallback."
     fi
-fi
-
-P10K_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
-if [ ! -d "$P10K_DIR" ]; then
-    echo "[Shell] Installing Powerlevel10k Theme..."
-    git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$P10K_DIR"
-fi
-
-TPM_DIR="$HOME/.tmux/plugins/tpm"
-if [ ! -d "$TPM_DIR" ]; then
-    echo "[Tmux] Installing TPM (Tmux Plugin Manager)..."
-    git clone --depth=1 https://github.com/tmux-plugins/tpm "$TPM_DIR"
 fi
 
 create_symlink() {
@@ -273,11 +356,45 @@ fi
 
 # Sync Neovim plugins to the lockfile and build treesitter parsers, so updatedot
 # is self-contained (restore switches nvim-treesitter to its `main` branch).
+# Both steps are skipped when there's nothing to do — a headless nvim start
+# plus a plugin sync isn't free, and updatedot may run this daily.
 if command -v nvim >/dev/null 2>&1; then
-    echo "[Neovim] Syncing plugins & building parsers..."
-    nvim --headless "+Lazy! restore" +qa 2>/dev/null
-    nvim --headless "+lua require('nvim-treesitter').install({'c','cpp','lua','rust','python','bash'}):wait(300000)" +qa 2>/dev/null \
-        || echo "[WARNING] treesitter parser build failed; open nvim and run :TSUpdate."
+    NVIM_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/nvim"
+    TS_LANGS="c cpp lua rust python bash"
+
+    # A new nvim build can break ABI compatibility with already-compiled
+    # parsers / installed plugins, so an nvim version bump forces a resync
+    # even if the lockfile/parser files themselves look unchanged.
+    NVIM_VER_STAMP="$STATE_DIR/nvim-version"
+    CUR_NVIM_VER="$(nvim --version | head -1)"
+    NVIM_VER_CHANGED=0
+    [ "$CUR_NVIM_VER" != "$(cat "$NVIM_VER_STAMP" 2>/dev/null)" ] && NVIM_VER_CHANGED=1
+
+    LOCK_FILE="$DOTFILES_DIR/nvim/lazy-lock.json"
+    LOCK_STAMP="$STATE_DIR/lazy-lock.sha256"
+    LOCK_HASH=""
+    [ -f "$LOCK_FILE" ] && LOCK_HASH="$(_sha256 "$LOCK_FILE")"
+    if [ "$NVIM_VER_CHANGED" = 1 ] || [ ! -d "$NVIM_DATA_DIR/lazy" ] || [ "$LOCK_HASH" != "$(cat "$LOCK_STAMP" 2>/dev/null)" ]; then
+        echo "[Neovim] Syncing plugins to lockfile..."
+        nvim --headless "+Lazy! restore" +qa 2>/dev/null
+        echo "$LOCK_HASH" > "$LOCK_STAMP"
+    else
+        echo "[Neovim] Plugins already match the lockfile — skipping Lazy restore."
+    fi
+
+    TS_MISSING=0
+    for lang in $TS_LANGS; do
+        [ -f "$NVIM_DATA_DIR/site/parser/${lang}.so" ] || TS_MISSING=1
+    done
+    if [ "$NVIM_VER_CHANGED" = 1 ] || [ "$TS_MISSING" = 1 ]; then
+        echo "[Neovim] Building treesitter parsers..."
+        nvim --headless "+lua require('nvim-treesitter').install({'c','cpp','lua','rust','python','bash'}):wait(300000)" +qa 2>/dev/null \
+            || echo "[WARNING] treesitter parser build failed; open nvim and run :TSUpdate."
+    else
+        echo "[Neovim] Treesitter parsers already installed — skipping build."
+    fi
+
+    echo "$CUR_NVIM_VER" > "$NVIM_VER_STAMP"
 fi
 
 # -----------------------------------------------------------------------------

@@ -12,6 +12,12 @@
 # out of the neighbor table — which doubles as a reachability check before
 # you start flooding. Picks are saved per-machine (untracked); Enter keeps
 # the last value at every subsequent prompt.
+#
+# `floodfd dpdk` reuses pktfd's DPDK/NIC helpers (_fd_pick_iface,
+# _fd_is_mellanox, _fd_lcore_plan, _fd_check_numa, _fd_reserve_hugepages,
+# _fd_vfio_bind/_fd_vfio_restore) from firedancer-pktgen.zsh — same DPDK
+# pktgen mechanics as pktfd, aimed at an over-the-wire target instead of a
+# physical-loopback rig.
 
 FLOODFD_STATE_FILE="$HOME/.config/dotfiles/floodfd-state"
 _floodfd_get() { grep "^$1=" "$FLOODFD_STATE_FILE" 2>/dev/null | cut -d= -f2-; }
@@ -37,43 +43,13 @@ function floodfd() {
     esac
 }
 
-# _floodfd_pick <label> [current]: list network interfaces and prompt for
-# one, printing the choice to stdout. Enter keeps [current] if given.
-function _floodfd_pick() {
-    local label=$1 cur=$2
-    local ifaces=() i idx=1 drv
-    echo "Available interfaces:" >&2
-    for i in /sys/class/net/*(N); do
-        i=${i##*/}
-        [ "$i" = lo ] && continue
-        drv=$(basename "$(readlink -f /sys/class/net/$i/device/driver 2>/dev/null)" 2>/dev/null)
-        ifaces+=("$i")
-        printf "  %d) %-20s %s\n" "$idx" "$i" "${drv:+driver: $drv}" >&2
-        idx=$((idx + 1))
-    done
-    [ ${#ifaces} -eq 0 ] && { echo "floodfd: no network interfaces found." >&2; return 1; }
-
-    local sel
-    read "sel?${label}${cur:+ (Enter = keep '$cur')} [1-${#ifaces}]: "
-    if [ -z "$sel" ]; then
-        [ -z "$cur" ] && { echo "floodfd: no interface selected." >&2; return 1; }
-        echo "$cur"
-        return 0
-    fi
-    if ! [[ "$sel" =~ '^[0-9]+$' ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt ${#ifaces} ]; then
-        echo "floodfd: invalid selection '$sel'." >&2
-        return 1
-    fi
-    echo "${ifaces[$sel]}"
-}
-
 # floodfd setup: pick the sending NIC, take a destination IP, then ping it
 # and read the resolved MAC out of the neighbor table. The ping doubles as a
 # reachability check — if it fails, something's wrong with routing/cabling
 # before you ever get to flooding.
 function _floodfd_setup() {
     local iface
-    iface=$(_floodfd_pick "Sending NIC" "$(_floodfd_get if)") || return 1
+    iface=$(_fd_pick_iface "floodfd" "Sending NIC" "$(_floodfd_get if)") || return 1
 
     if ! ip link show "$iface" >/dev/null 2>&1; then
         echo "floodfd setup: interface '$iface' not found."
@@ -321,22 +297,9 @@ function _floodfd_dpdk() {
     fi
     _floodfd_set dpdkcores "$ntx"
 
-    local main=15 rxcore=14 txhi=13
-    local txlo=$((txhi - ntx + 1))
-    local lcores="${txlo}-${main}"
-    local txrange="$txhi"
-    [ "$txlo" -lt "$txhi" ] && txrange="${txlo}-${txhi}"
-    local map="[${rxcore}:${txrange}].0"
-    local est=$((ntx * 30))
-
-    if [ ! -d "/sys/devices/system/cpu/cpu$main" ]; then
-        echo "floodfd dpdk: layout needs at least 16 cores (uses up to core $main); machine has $(nproc)."
-        return 1
-    fi
-    if [ "$txlo" -lt 0 ]; then
-        echo "floodfd dpdk: $ntx TX cores would run past core 0 (lowest = $txlo). Choose fewer."
-        return 1
-    fi
+    local plan main rxcore txlo txrange lcores map est
+    plan=$(_fd_lcore_plan "floodfd dpdk" "$ntx") || return 1
+    read -r main rxcore txlo txrange lcores map est <<< "$plan"
 
     _floodfd_ensure_dpdk || return 1
     if [ ! -e "/sys/class/net/$iface" ]; then
@@ -351,60 +314,18 @@ function _floodfd_dpdk() {
     ifip=$(ip -4 -o addr show dev "$iface" | awk '{print $4}' | head -1)
 
     local mellanox=0
-    case "$curdrv" in mlx5_core|mlx5) mellanox=1 ;; esac
-    local defans; [ "$mellanox" = 1 ] && defans=Y || defans=N
-    [ -n "$curdrv" ] && echo "Detected kernel driver for $iface: $curdrv"
-    local ans
-    read "ans?Mellanox/mlx5 NIC (no vfio-pci rebind needed)? [$defans]: "
-    ans=${ans:-$defans}
-    case "$ans" in y|Y|yes|Yes) mellanox=1 ;; *) mellanox=0 ;; esac
+    _fd_is_mellanox "$iface" "$curdrv" && mellanox=1
 
-    # Warn if any TX/RX/main core isn't on the NIC's NUMA node (cross-socket DMA skews results).
-    local c cnode badcores n
-    if [ -n "$nicnode" ] && [ "$nicnode" != "-1" ]; then
-        for c in {$txlo..$main}; do
-            cnode=""
-            for n in /sys/devices/system/cpu/cpu$c/node*(N); do cnode=${n##*/node}; done
-            [ -n "$cnode" ] && [ "$cnode" != "$nicnode" ] && badcores="${badcores} $c"
-        done
-        if [ -n "$badcores" ]; then
-            echo "floodfd dpdk: WARNING — $iface is on NUMA node $nicnode but core(s)$badcores are on another node."
-            echo "  Cross-socket DMA will skew results; pin to cores on node $nicnode for accurate numbers."
-        fi
-    fi
+    _fd_check_numa "floodfd dpdk" "$iface" "$nicnode" "$txlo" "$main"
 
     echo "DPDK pktgen core plan on $iface:"
     echo "  $main    main lcore (DPDK control/CLI — no traffic)"
     echo "  $rxcore    RX core"
     echo "  $txrange  TX core(s) x$ntx  ->  ~${est} Mpps max (rough 30 Mpps/core guide, capped by NIC line rate)"
 
-    # Reserve 2MB hugepages (1024 per TX core) and mount a 2MB hugetlbfs if needed.
-    local npages=$(( 1024 * ntx ))
-    echo "Reserving $npages x 2MB hugepages ($((npages * 2)) MiB)..."
-    echo "$npages" | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null
-    if ! grep -q 'hugetlbfs.*pagesize=2M' /proc/mounts; then
-        sudo mkdir -p /mnt/huge && sudo mount -t hugetlbfs -o pagesize=2M nodev /mnt/huge
-    fi
+    _fd_reserve_hugepages "$ntx"
 
-    if [ "$mellanox" != 1 ]; then
-        echo "Binding $iface ($pci, ${curdrv:-unknown}) to vfio-pci for DPDK..."
-        sudo modprobe vfio-pci 2>/dev/null
-        if ! ls /sys/kernel/iommu_groups/* >/dev/null 2>&1; then
-            echo "  NOTE: no IOMMU groups found. vfio-pci needs an IOMMU (boot with 'intel_iommu=on iommu=pt'),"
-            echo "        or enable no-IOMMU mode: echo 1 | sudo tee /sys/module/vfio/parameters/enable_unsafe_noiommu_mode"
-        fi
-        if command -v dpdk-devbind.py >/dev/null 2>&1; then
-            sudo dpdk-devbind.py --bind=vfio-pci "$pci"
-        else
-            echo vfio-pci | sudo tee "/sys/bus/pci/devices/$pci/driver_override" >/dev/null
-            [ -e "/sys/bus/pci/devices/$pci/driver" ] && \
-                echo "$pci" | sudo tee "/sys/bus/pci/devices/$pci/driver/unbind" >/dev/null
-            echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null
-        fi
-        printf 'pci=%s\ndrv=%s\nif=%s\nifip=%s\n' \
-            "$pci" "$curdrv" "$iface" "$ifip" > /tmp/floodfd-bound
-        echo "  To rebind the kernel driver + restore $iface later:  floodfd restore"
-    fi
+    [ "$mellanox" != 1 ] && _fd_vfio_bind floodfd "$iface" "$pci" "$curdrv" /tmp/floodfd-bound "" "$ifip"
 
     local cmds=/tmp/floodfd-dpdk.pkt
     cat > "$cmds" <<EOF
@@ -423,60 +344,5 @@ EOF
 }
 
 # floodfd restore: undo a vfio-pci bind from `floodfd dpdk` — rebind the NIC
-# to its kernel driver and rename the reborn netdev back to its original
-# name, mirroring pktfd restore.
-function _floodfd_restore() {
-    local state=/tmp/floodfd-bound
-    if [ ! -f "$state" ]; then
-        echo "floodfd restore: no saved state ($state) — nothing was bound to vfio-pci."
-        return 1
-    fi
-
-    local pci drv iface ifip k v
-    while IFS='=' read -r k v; do
-        case "$k" in
-            pci)  pci=$v  ;; drv)  drv=$v  ;;
-            if)   iface=$v ;; ifip) ifip=$v ;;
-        esac
-    done < "$state"
-    if [ -z "$pci" ]; then
-        echo "floodfd restore: state file is malformed; remove $state and re-run 'floodfd dpdk'."
-        return 1
-    fi
-
-    echo "Rebinding $pci to kernel driver '${drv:-?}'..."
-    if command -v dpdk-devbind.py >/dev/null 2>&1 && [ -n "$drv" ]; then
-        sudo dpdk-devbind.py --bind="$drv" "$pci"
-    else
-        echo "$pci" | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind >/dev/null 2>&1
-        echo "" | sudo tee "/sys/bus/pci/devices/$pci/driver_override" >/dev/null
-        if [ -n "$drv" ] && [ -d "/sys/bus/pci/drivers/$drv" ]; then
-            echo "$pci" | sudo tee "/sys/bus/pci/drivers/$drv/bind" >/dev/null 2>&1
-        fi
-        echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null 2>&1
-    fi
-
-    # The kernel re-creates the netdev under a fresh name; rename it back.
-    local newname n
-    for n in /sys/bus/pci/devices/$pci/net/*(N); do newname=${n##*/}; done
-    if [ -z "$newname" ]; then
-        echo "floodfd restore: device rebound but no netdev appeared for $pci."
-        echo "  Check 'ip link'; you may need to re-run, or driver '$drv' failed to attach."
-        return 1
-    fi
-    iface=${iface:-$newname}
-    if [ "$newname" != "$iface" ]; then
-        echo "Renaming '$newname' -> '$iface'..."
-        sudo ip link set "$newname" down && \
-        sudo ip link set "$newname" name "$iface"
-    fi
-    sudo ip link set "$iface" up
-
-    if [ -n "$ifip" ] && ! ip -4 -o addr show dev "$iface" | grep -q "${ifip%%/*}"; then
-        echo "Re-adding $ifip to $iface (lost when the netdev was destroyed)..."
-        sudo ip addr add "$ifip" dev "$iface"
-    fi
-
-    rm -f "$state"
-    echo "Done — $iface is back on the kernel driver."
-}
+# to its kernel driver and rename the reborn netdev back to its original name.
+function _floodfd_restore() { _fd_vfio_restore "floodfd restore" /tmp/floodfd-bound; }

@@ -1,20 +1,18 @@
 # ── Firedancer Packet Generation ─────────────────────
 # `pktfd` runs the current binary's pktgen; `pktfd setup` prepares a physical-
-# loopback test rig. Relies on _fdbin/_fdbinpath/_fdconfig from firedancer.zsh
-# and firedancer-config.zsh.
+# loopback test rig. Relies on _fdbin/_fdbinpath/_fdconfig/_fd_dispatch from
+# firedancer.zsh and firedancer-config.zsh.
 #
 # `pktfd setup` prompts for each NIC only when it's actually needed: the
 # firedancer NIC up front, the DPDK pktgen NIC only after you've said you
 # want to start pktgen. Picks are saved per-machine (untracked) — Enter
 # keeps the last one.
-
-# DPDK's "main" lcore runs control/CLI and generates no traffic; pktgen also
-# needs one core to service RX. Every remaining core is a dedicated TX
-# (generation) core, and TX throughput scales with their count. Cores are
-# allotted top-down so it fits a 16-core box (cores 0-15):
-#   main 15 | RX 14 | TX 13, 12, 11, ...
-# DPDK would otherwise default the main lcore to the lowest core in -l (a TX
-# core here), so we pin it explicitly with --main-lcore.
+#
+# This file also defines the DPDK/NIC helpers floodfd.zsh reuses for its own
+# `floodfd dpdk` engine (_fd_pick_iface, _fd_is_mellanox, _fd_lcore_plan,
+# _fd_check_numa, _fd_reserve_hugepages, _fd_vfio_bind/_fd_vfio_restore) —
+# both drive DPDK pktgen the same way, just against a loopback peer vs. a
+# target over the wire.
 
 PKTFD_IFACES_FILE="$HOME/.config/dotfiles/pktfd-ifaces"
 _pktfd_fdif() { grep '^fdif=' "$PKTFD_IFACES_FILE" 2>/dev/null | cut -d= -f2-; }
@@ -32,13 +30,15 @@ function pktfd() {
     if [ "$1" = setup ];   then shift; _pktfd_setup "$@";   return; fi
     if [ "$1" = restore ]; then shift; _pktfd_restore "$@"; return; fi
     if [ "$1" = gdb ];     then shift; sudo gdb -q --args "$(_fdbinpath)" pktgen --config "$(_fdconfig)" "$@"; return; fi
-    sudo "$(_fdbinpath)" pktgen --config "$(_fdconfig)"
+    _fd_dispatch "$1" sudo "$(_fdbinpath)" pktgen --config "$(_fdconfig)"
 }
 
-# _pktfd_pick <label> [current]: list network interfaces and prompt for one,
-# printing the choice to stdout. Enter keeps [current] if given.
-function _pktfd_pick() {
-    local label=$1 cur=$2
+# ── Shared DPDK/NIC Helpers (pktfd + floodfd) ────────
+
+# _fd_pick_iface <prefix> <label> [current]: list network interfaces and
+# prompt for one, printing the choice to stdout. Enter keeps [current] if given.
+function _fd_pick_iface() {
+    local prefix=$1 label=$2 cur=$3
     local ifaces=() i idx=1 drv
     echo "Available interfaces:" >&2
     for i in /sys/class/net/*(N); do
@@ -49,20 +49,181 @@ function _pktfd_pick() {
         printf "  %d) %-20s %s\n" "$idx" "$i" "${drv:+driver: $drv}" >&2
         idx=$((idx + 1))
     done
-    [ ${#ifaces} -eq 0 ] && { echo "pktfd: no network interfaces found." >&2; return 1; }
+    [ ${#ifaces} -eq 0 ] && { echo "$prefix: no network interfaces found." >&2; return 1; }
 
     local sel
     read "sel?${label}${cur:+ (Enter = keep '$cur')} [1-${#ifaces}]: "
     if [ -z "$sel" ]; then
-        [ -z "$cur" ] && { echo "pktfd: no interface selected." >&2; return 1; }
+        [ -z "$cur" ] && { echo "$prefix: no interface selected." >&2; return 1; }
         echo "$cur"
         return 0
     fi
     if ! [[ "$sel" =~ '^[0-9]+$' ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt ${#ifaces} ]; then
-        echo "pktfd: invalid selection '$sel'." >&2
+        echo "$prefix: invalid selection '$sel'." >&2
         return 1
     fi
     echo "${ifaces[$sel]}"
+}
+
+# _fd_is_mellanox <iface> <curdrv>: detects (and lets the user confirm/
+# override) whether <iface> is a bifurcated Mellanox PMD — DPDK drives it
+# while it stays on the kernel driver, so it never needs a vfio-pci rebind.
+function _fd_is_mellanox() {
+    local iface=$1 curdrv=$2 mellanox=0
+    case "$curdrv" in mlx5_core|mlx5) mellanox=1 ;; esac
+    local defans; [ "$mellanox" = 1 ] && defans=Y || defans=N
+    [ -n "$curdrv" ] && echo "Detected kernel driver for $iface: $curdrv"
+    local ans
+    read "ans?Mellanox/mlx5 NIC (no vfio-pci rebind needed)? [$defans]: "
+    ans=${ans:-$defans}
+    case "$ans" in y|Y|yes|Yes) return 0 ;; *) return 1 ;; esac
+}
+
+# _fd_lcore_plan <prefix> <ntx>: lays out DPDK lcores top-down (fits a
+# 16-core box): main 15 | RX 14 | TX 13, 12, ... Every core past the main
+# and RX cores is a dedicated TX (generation) core, and TX throughput scales
+# with their count. DPDK would otherwise default the main lcore to the
+# lowest core in -l (a TX core here), so it's pinned explicitly with
+# --main-lcore. On success prints "<main> <rxcore> <txlo> <txrange> <lcores>
+# <map> <est>" to stdout; on failure (machine too small, or <ntx> would run
+# past core 0) prints an error prefixed with <prefix> and returns 1.
+function _fd_lcore_plan() {
+    local prefix=$1 ntx=$2
+    local main=15 rxcore=14 txhi=13
+    local txlo=$((txhi - ntx + 1))
+    if [ ! -d "/sys/devices/system/cpu/cpu$main" ]; then
+        echo "$prefix: layout needs at least 16 cores (uses up to core $main); machine has $(nproc)." >&2
+        return 1
+    fi
+    if [ "$txlo" -lt 0 ]; then
+        echo "$prefix: $ntx TX cores would run past core 0 (lowest = $txlo). Choose fewer." >&2
+        return 1
+    fi
+    local lcores="${txlo}-${main}"
+    local txrange="$txhi"
+    [ "$txlo" -lt "$txhi" ] && txrange="${txlo}-${txhi}"
+    local map="[${rxcore}:${txrange}].0"
+    local est=$((ntx * 30))
+    echo "$main $rxcore $txlo $txrange $lcores $map $est"
+}
+
+# _fd_check_numa <prefix> <iface> <nicnode> <lo> <hi>: warns if any core in
+# [lo, hi] isn't on the NIC's NUMA node — cross-socket DMA skews throughput.
+function _fd_check_numa() {
+    local prefix=$1 iface=$2 nicnode=$3 lo=$4 hi=$5
+    if [ -z "$nicnode" ] || [ "$nicnode" = "-1" ]; then return 0; fi
+    local c cnode badcores n
+    for c in {$lo..$hi}; do
+        cnode=""
+        for n in /sys/devices/system/cpu/cpu$c/node*(N); do cnode=${n##*/node}; done
+        [ -n "$cnode" ] && [ "$cnode" != "$nicnode" ] && badcores="${badcores} $c"
+    done
+    if [ -n "$badcores" ]; then
+        echo "$prefix: WARNING — $iface is on NUMA node $nicnode but core(s)$badcores are on another node."
+        echo "  Cross-socket DMA will skew results; pin to cores on node $nicnode for accurate numbers."
+    fi
+}
+
+# _fd_reserve_hugepages <ntx>: reserves 1024 x 2MB hugepages per TX core and
+# mounts a 2MB hugetlbfs at /mnt/huge if one isn't already mounted.
+function _fd_reserve_hugepages() {
+    local ntx=$1
+    local npages=$(( 1024 * ntx ))
+    echo "Reserving $npages x 2MB hugepages ($((npages * 2)) MiB)..."
+    echo "$npages" | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null
+    if ! grep -q 'hugetlbfs.*pagesize=2M' /proc/mounts; then
+        sudo mkdir -p /mnt/huge && sudo mount -t hugetlbfs -o pagesize=2M nodev /mnt/huge
+    fi
+}
+
+# _fd_vfio_bind <tool> <iface> <pci> <curdrv> <statefile> [peer] [ip]: binds
+# <iface> to vfio-pci for DPDK and records pci/drv/if/ip/peer in <statefile>
+# so _fd_vfio_restore can undo it later. <tool> names the command that hints
+# how to restore (e.g. "pktfd", "floodfd"). Only call this for non-Mellanox
+# NICs (see _fd_is_mellanox) — Mellanox never needs rebinding.
+function _fd_vfio_bind() {
+    local tool=$1 iface=$2 pci=$3 curdrv=$4 state=$5 peer=$6 ip=$7
+    echo "Binding $iface ($pci, ${curdrv:-unknown}) to vfio-pci for DPDK..."
+    sudo modprobe vfio-pci 2>/dev/null
+    if ! ls /sys/kernel/iommu_groups/* >/dev/null 2>&1; then
+        echo "  NOTE: no IOMMU groups found. vfio-pci needs an IOMMU (boot with 'intel_iommu=on iommu=pt'),"
+        echo "        or enable no-IOMMU mode: echo 1 | sudo tee /sys/module/vfio/parameters/enable_unsafe_noiommu_mode"
+    fi
+    if command -v dpdk-devbind.py >/dev/null 2>&1; then
+        sudo dpdk-devbind.py --bind=vfio-pci "$pci"
+    else
+        echo vfio-pci | sudo tee "/sys/bus/pci/devices/$pci/driver_override" >/dev/null
+        [ -e "/sys/bus/pci/devices/$pci/driver" ] && \
+            echo "$pci" | sudo tee "/sys/bus/pci/devices/$pci/driver/unbind" >/dev/null
+        echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null
+    fi
+    printf 'pci=%s\ndrv=%s\nif=%s\nip=%s\npeer=%s\n' "$pci" "$curdrv" "$iface" "$ip" "$peer" > "$state"
+    echo "  To rebind the kernel driver + restore $iface later:  $tool restore"
+}
+
+# _fd_vfio_restore <prefix> <statefile>: undoes _fd_vfio_bind — rebinds the
+# interface to its kernel driver, renames the reborn netdev back, restores
+# its IP, and bounces a peer interface if one was recorded (pktfd's loopback
+# rig needs the far end bounced to re-establish carrier).
+function _fd_vfio_restore() {
+    local prefix=$1 state=$2
+    if [ ! -f "$state" ]; then
+        echo "$prefix: no saved state ($state) — nothing was bound to vfio-pci."
+        return 1
+    fi
+
+    local pci drv iface ip peer k v
+    while IFS='=' read -r k v; do
+        case "$k" in
+            pci) pci=$v ;; drv) drv=$v ;;
+            if)  iface=$v ;; ip) ip=$v ;; peer) peer=$v ;;
+        esac
+    done < "$state"
+    if [ -z "$pci" ]; then
+        echo "$prefix: state file is malformed; remove $state and re-run setup."
+        return 1
+    fi
+
+    echo "Rebinding $pci to kernel driver '${drv:-?}'..."
+    if command -v dpdk-devbind.py >/dev/null 2>&1 && [ -n "$drv" ]; then
+        sudo dpdk-devbind.py --bind="$drv" "$pci"
+    else
+        echo "$pci" | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind >/dev/null 2>&1
+        echo "" | sudo tee "/sys/bus/pci/devices/$pci/driver_override" >/dev/null
+        if [ -n "$drv" ] && [ -d "/sys/bus/pci/drivers/$drv" ]; then
+            echo "$pci" | sudo tee "/sys/bus/pci/drivers/$drv/bind" >/dev/null 2>&1
+        fi
+        echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null 2>&1
+    fi
+
+    # The kernel re-creates the netdev under a fresh name; rename it back.
+    local newname n
+    for n in /sys/bus/pci/devices/$pci/net/*(N); do newname=${n##*/}; done
+    if [ -z "$newname" ]; then
+        echo "$prefix: device rebound but no netdev appeared for $pci."
+        echo "  Check 'ip link'; you may need to re-run, or driver '$drv' failed to attach."
+        return 1
+    fi
+    iface=${iface:-$newname}
+    if [ "$newname" != "$iface" ]; then
+        echo "Renaming '$newname' -> '$iface'..."
+        sudo ip link set "$newname" down && \
+        sudo ip link set "$newname" name "$iface"
+    fi
+    sudo ip link set "$iface" up
+
+    if [ -n "$ip" ] && ! ip -4 -o addr show dev "$iface" | grep -q "${ip%%/*}"; then
+        echo "Re-adding $ip to $iface (lost when the netdev was destroyed)..."
+        sudo ip addr add "$ip" dev "$iface"
+    fi
+    if [ -n "$peer" ] && ip link show "$peer" >/dev/null 2>&1; then
+        echo "Bouncing $peer to re-establish carrier on the loopback link..."
+        sudo ip link set "$peer" down && sudo ip link set "$peer" up
+    fi
+
+    rm -f "$state"
+    echo "Done — $iface is back on the kernel driver."
+    [ -n "$peer" ] && echo "  $peer link restored."
 }
 
 # pktfd setup: point the firedancer NIC at the peer (route + static ARP), then
@@ -71,7 +232,7 @@ function _pktfd_pick() {
 # others must be bound to vfio-pci for pktgen.
 function _pktfd_setup() {
     local fdif
-    fdif=$(_pktfd_pick "Firedancer NIC" "$(_pktfd_fdif)") || return 1
+    fdif=$(_fd_pick_iface "pktfd" "Firedancer NIC" "$(_pktfd_fdif)") || return 1
     _pktfd_setif fdif "$fdif"
 
     if ! ip link show "$fdif" >/dev/null 2>&1; then
@@ -100,7 +261,7 @@ function _pktfd_setup() {
     esac
 
     local pgif
-    pgif=$(_pktfd_pick "Pktgen NIC" "$(_pktfd_pgif)") || return 1
+    pgif=$(_fd_pick_iface "pktfd" "Pktgen NIC" "$(_pktfd_pgif)") || return 1
     _pktfd_setif pgif "$pgif"
 
     # How many TX (generation) cores? More cores -> more Mpps, up to NIC line rate.
@@ -113,23 +274,9 @@ function _pktfd_setup() {
         return 1
     fi
 
-    # Lay out lcores top-down (fits a 16-core box): main 15 | RX 14 | TX 13,12,...
-    local main=15 rxcore=14 txhi=13
-    local txlo=$((txhi - ntx + 1))
-    local lcores="${txlo}-${main}"
-    local txrange="$txhi"
-    [ "$txlo" -lt "$txhi" ] && txrange="${txlo}-${txhi}"
-    local map="[${rxcore}:${txrange}].0"
-    local est=$((ntx * 30))
-
-    if [ ! -d "/sys/devices/system/cpu/cpu$main" ]; then
-        echo "pktfd setup: layout needs at least 16 cores (uses up to core $main); machine has $(nproc)."
-        return 1
-    fi
-    if [ "$txlo" -lt 0 ]; then
-        echo "pktfd setup: $ntx TX cores would run past core 0 (lowest = $txlo). Choose fewer."
-        return 1
-    fi
+    local plan main rxcore txlo txrange lcores map est
+    plan=$(_fd_lcore_plan "pktfd setup" "$ntx") || return 1
+    read -r main rxcore txlo txrange lcores map est <<< "$plan"
 
     if ! ip link show "$pgif" >/dev/null 2>&1; then
         echo "pktfd setup: pktgen interface '$pgif' not found."
@@ -156,15 +303,8 @@ function _pktfd_setup() {
         esac
     fi
 
-    # Mellanox (mlx5) is a bifurcated PMD: DPDK drives it while it stays on the
-    # kernel driver, so no rebind needed. Everything else needs vfio-pci.
     local mellanox=0
-    case "$curdrv" in mlx5_core|mlx5) mellanox=1 ;; esac
-    local defans; [ "$mellanox" = 1 ] && defans=Y || defans=N
-    [ -n "$curdrv" ] && echo "Detected kernel driver for $pgif: $curdrv"
-    read "ans?Mellanox/mlx5 NIC (no vfio-pci rebind needed)? [$defans]: "
-    ans=${ans:-$defans}
-    case "$ans" in y|Y|yes|Yes) mellanox=1 ;; *) mellanox=0 ;; esac
+    _fd_is_mellanox "$pgif" "$curdrv" && mellanox=1
 
     # Aim pktgen at fdif: its MAC and its IPv4.
     local dstmac dstip
@@ -175,52 +315,16 @@ function _pktfd_setup() {
         return 1
     fi
 
-    # Warn if any pktgen core isn't on pgif's NUMA node (cross-socket DMA skews results).
-    local c cnode badcores n
-    if [ -n "$nicnode" ] && [ "$nicnode" != "-1" ]; then
-        for c in {$txlo..$main}; do
-            cnode=""
-            for n in /sys/devices/system/cpu/cpu$c/node*(N); do cnode=${n##*/node}; done
-            [ -n "$cnode" ] && [ "$cnode" != "$nicnode" ] && badcores="${badcores} $c"
-        done
-        if [ -n "$badcores" ]; then
-            echo "pktfd setup: WARNING — $pgif is on NUMA node $nicnode but core(s)$badcores are on another node."
-            echo "  Cross-socket DMA will skew results; pin to cores on node $nicnode for accurate numbers."
-        fi
-    fi
+    _fd_check_numa "pktfd setup" "$pgif" "$nicnode" "$txlo" "$main"
 
     echo "DPDK pktgen core plan on $pgif:"
     echo "  $main    main lcore (DPDK control/CLI — no traffic)"
     echo "  $rxcore    RX core"
     echo "  $txrange  TX core(s) x$ntx  ->  ~${est} Mpps max (rough 30 Mpps/core guide, capped by NIC line rate)"
 
-    # Reserve 2MB hugepages (1024 per TX core) and mount a 2MB hugetlbfs if needed.
-    local npages=$(( 1024 * ntx ))
-    echo "Reserving $npages x 2MB hugepages ($((npages * 2)) MiB)..."
-    echo "$npages" | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null
-    if ! grep -q 'hugetlbfs.*pagesize=2M' /proc/mounts; then
-        sudo mkdir -p /mnt/huge && sudo mount -t hugetlbfs -o pagesize=2M nodev /mnt/huge
-    fi
+    _fd_reserve_hugepages "$ntx"
 
-    if [ "$mellanox" != 1 ]; then
-        echo "Binding $pgif ($pci, ${curdrv:-unknown}) to vfio-pci for DPDK..."
-        sudo modprobe vfio-pci 2>/dev/null
-        if ! ls /sys/kernel/iommu_groups/* >/dev/null 2>&1; then
-            echo "  NOTE: no IOMMU groups found. vfio-pci needs an IOMMU (boot with 'intel_iommu=on iommu=pt'),"
-            echo "        or enable no-IOMMU mode: echo 1 | sudo tee /sys/module/vfio/parameters/enable_unsafe_noiommu_mode"
-        fi
-        if command -v dpdk-devbind.py >/dev/null 2>&1; then
-            sudo dpdk-devbind.py --bind=vfio-pci "$pci"
-        else
-            echo vfio-pci | sudo tee "/sys/bus/pci/devices/$pci/driver_override" >/dev/null
-            [ -e "/sys/bus/pci/devices/$pci/driver" ] && \
-                echo "$pci" | sudo tee "/sys/bus/pci/devices/$pci/driver/unbind" >/dev/null
-            echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null
-        fi
-        printf 'pci=%s\ndrv=%s\npgif=%s\nfdif=%s\npgip=%s\n' \
-            "$pci" "$curdrv" "$pgif" "$fdif" "$pgip" > /tmp/pktfd-bound
-        echo "  To rebind the kernel driver + restore $pgif later:  pktfd restore"
-    fi
+    [ "$mellanox" != 1 ] && _fd_vfio_bind pktfd "$pgif" "$pci" "$curdrv" /tmp/pktfd-bound "$fdif" "$pgip"
 
     local cmds=/tmp/pktfd-setup.pkt
     cat > "$cmds" <<EOF
@@ -239,65 +343,5 @@ EOF
 
 # pktfd restore: undo a vfio-pci bind from `pktfd setup` — rebind the pktgen NIC
 # to its kernel driver and rename the reborn netdev, so the next `pktfd setup`
-# finds it. Reads state written at bind time. (Mellanox runs never bind, so
-# there's nothing to restore.)
-function _pktfd_restore() {
-    local state=/tmp/pktfd-bound
-    if [ ! -f "$state" ]; then
-        echo "pktfd restore: no saved state ($state) — nothing was bound to vfio-pci."
-        return 1
-    fi
-
-    local pci drv pgif fdif pgip k v
-    while IFS='=' read -r k v; do
-        case "$k" in
-            pci)  pci=$v  ;; drv)  drv=$v  ;;
-            pgif) pgif=$v ;; fdif) fdif=$v ;; pgip) pgip=$v ;;
-            name) [ -z "$pgif" ] && pgif=$v ;;  # compat: old state used 'name'
-        esac
-    done < "$state"
-    if [ -z "$pci" ]; then
-        echo "pktfd restore: state file is malformed; remove $state and re-run setup."
-        return 1
-    fi
-
-    echo "Rebinding $pci to kernel driver '${drv:-?}'..."
-    if command -v dpdk-devbind.py >/dev/null 2>&1 && [ -n "$drv" ]; then
-        sudo dpdk-devbind.py --bind="$drv" "$pci"
-    else
-        echo "$pci" | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind >/dev/null 2>&1
-        echo "" | sudo tee "/sys/bus/pci/devices/$pci/driver_override" >/dev/null
-        if [ -n "$drv" ] && [ -d "/sys/bus/pci/drivers/$drv" ]; then
-            echo "$pci" | sudo tee "/sys/bus/pci/drivers/$drv/bind" >/dev/null 2>&1
-        fi
-        echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null 2>&1
-    fi
-
-    # The kernel re-creates the netdev under a fresh name; rename it back.
-    local newname n
-    for n in /sys/bus/pci/devices/$pci/net/*(N); do newname=${n##*/}; done
-    if [ -z "$newname" ]; then
-        echo "pktfd restore: device rebound but no netdev appeared for $pci."
-        echo "  Check 'ip link'; you may need to re-run, or driver '$drv' failed to attach."
-        return 1
-    fi
-    pgif=${pgif:-$newname}
-    if [ "$newname" != "$pgif" ]; then
-        echo "Renaming '$newname' -> '$pgif'..."
-        sudo ip link set "$newname" down && \
-        sudo ip link set "$newname" name "$pgif"
-    fi
-    sudo ip link set "$pgif" up
-
-    if [ -n "$pgip" ] && ! ip -4 -o addr show dev "$pgif" | grep -q "${pgip%%/*}"; then
-        echo "Re-adding $pgip to $pgif (lost when the netdev was destroyed)..."
-        sudo ip addr add "$pgip" dev "$pgif"
-    fi
-    if [ -n "$fdif" ] && ip link show "$fdif" >/dev/null 2>&1; then
-        echo "Bouncing $fdif to re-establish carrier on the loopback link..."
-        sudo ip link set "$fdif" down && sudo ip link set "$fdif" up
-    fi
-
-    rm -f "$state"
-    echo "Done — $pgif is back on the kernel driver; ${fdif:+$fdif/}$pgif link restored."
-}
+# finds it. (Mellanox runs never bind, so there's nothing to restore.)
+function _pktfd_restore() { _fd_vfio_restore "pktfd restore" /tmp/pktfd-bound; }
