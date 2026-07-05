@@ -177,6 +177,20 @@ function updatedot() {
     git clone https://github.com/tristanx86/dotfiles.git ~/dotfiles 2>/dev/null || (cd ~/dotfiles && git fetch && git reset --hard origin/main) && chmod +x ~/dotfiles/install.sh && ~/dotfiles/install.sh && exec zsh
 }
 
+# wipedot: undo install.sh — meant for fresh machines/servers. Full revert
+# (packages + login shell) only works if install.sh's original-state snapshot
+# exists (i.e. dotfiles was installed on this machine after wipedot shipped);
+# otherwise it degrades to removing symlinks/cloned dirs and offering to
+# delete the dotfiles folder. See wipe.sh for details.
+function wipedot() {
+    if [ ! -f ~/dotfiles/wipe.sh ]; then
+        echo "wipedot: ~/dotfiles/wipe.sh not found (old dotfiles checkout?) — run updatedot first."
+        return 1
+    fi
+    chmod +x ~/dotfiles/wipe.sh
+    ~/dotfiles/wipe.sh
+}
+
 # ── Firedancer Development ───────────────────────────
 # Firedancer build/run, config management, and pktgen/flood tooling live in
 # sibling files next to this one in the repo (DOTFILES_ZSH_DIR resolved near the top).

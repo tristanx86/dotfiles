@@ -9,11 +9,102 @@ set -uo pipefail
 DOTFILES_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 OS="$(uname -s)"
 FONT_DIR="$HOME/.local/share/fonts"
+source "$DOTFILES_DIR/install-packages.sh"
+
+# Detect distro family by available package manager (used below, and to know
+# which package list to check when snapshotting original machine state).
+DISTRO_FAMILY="" RHEL_PKG=""
+if [[ "$OS" == "Linux" ]]; then
+    if command -v apt-get &>/dev/null; then
+        DISTRO_FAMILY="debian"
+    elif command -v dnf &>/dev/null; then
+        DISTRO_FAMILY="rhel"; RHEL_PKG="dnf"
+    elif command -v yum &>/dev/null; then
+        DISTRO_FAMILY="rhel"; RHEL_PKG="yum"
+    else
+        DISTRO_FAMILY="unknown"
+    fi
+fi
 
 # Where we cache cheap "did this already happen recently" markers so re-runs
 # (updatedot) don't redo expensive network-bound work every single time.
 STATE_DIR="$HOME/.cache/dotfiles"
 mkdir -p "$STATE_DIR"
+
+# -----------------------------------------------------------------------------
+# Original-state snapshot (for `wipedot`)
+# -----------------------------------------------------------------------------
+# Written exactly once — the very first time install.sh runs on this machine,
+# before anything below installs a single package — so wipedot can later tell
+# apart "dotfiles installed this" (safe to remove) from "this was already
+# here" (leave it alone). Re-running install.sh/updatedot never overwrites it.
+# Machines that already had dotfiles installed before this existed have no
+# snapshot to work from; wipedot handles that as a degraded, best-effort case.
+ORIGINAL_STATE_FILE="$STATE_DIR/original-state"
+if [ ! -f "$ORIGINAL_STATE_FILE" ]; then
+    echo "[Wipedot] First run on this machine — recording original state for wipedot..."
+    {
+        echo "ORIGINAL_OS=$OS"
+        echo "ORIGINAL_DISTRO_FAMILY=$DISTRO_FAMILY"
+        echo "ORIGINAL_SHELL=$SHELL"
+
+        preexisting=()
+        case "$DISTRO_FAMILY" in
+            debian)
+                for pkg in "${DEBIAN_PKGS[@]+"${DEBIAN_PKGS[@]}"}" "${DEBIAN_PERF_PKGS[@]+"${DEBIAN_PERF_PKGS[@]}"}" "${DEBIAN_NEOVIM_PKGS[@]+"${DEBIAN_NEOVIM_PKGS[@]}"}"; do
+                    dpkg -s "$pkg" >/dev/null 2>&1 && preexisting+=("$pkg")
+                done
+                ;;
+            rhel)
+                for pkg in "${RHEL_PKGS[@]+"${RHEL_PKGS[@]}"}" "${RHEL_EXTRA_PKGS[@]+"${RHEL_EXTRA_PKGS[@]}"}" "${RHEL_PERF_PKGS[@]+"${RHEL_PERF_PKGS[@]}"}" "${RHEL_NEOVIM_PKGS[@]+"${RHEL_NEOVIM_PKGS[@]}"}"; do
+                    rpm -q "$pkg" >/dev/null 2>&1 && preexisting+=("$pkg")
+                done
+                ;;
+        esac
+        if [[ "$OS" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+            for pkg in "${BREW_FORMULAE[@]+"${BREW_FORMULAE[@]}"}"; do
+                brew list --formula "$pkg" >/dev/null 2>&1 && preexisting+=("$pkg")
+            done
+            for pkg in "${BREW_CASKS[@]+"${BREW_CASKS[@]}"}" "${BREW_CASKS_SOFT[@]+"${BREW_CASKS_SOFT[@]}"}"; do
+                brew list --cask "$pkg" >/dev/null 2>&1 && preexisting+=("$pkg")
+            done
+        fi
+        echo "PREEXISTING_PKGS=\"${preexisting[*]}\""
+
+        # None of these are apt/dnf/brew packages, so they need their own
+        # presence check — install.sh only ever acts on each when it's
+        # *absent* (every _task_* below is a "return 0 if already there"
+        # guard), so "was it here before" is the only fact wipedot needs; it
+        # never has to worry about dotfiles having upgraded/modified one that
+        # already existed.
+        _p() { [ -e "$1" ] && echo 1 || echo 0; }
+        echo "PREEXISTING_OHMYZSH=$(_p "$HOME/.oh-my-zsh")"
+        echo "PREEXISTING_CARGO=$(command -v cargo >/dev/null 2>&1 && echo 1 || echo 0)"
+        echo "PREEXISTING_KITTY=$(command -v kitty >/dev/null 2>&1 && echo 1 || echo 0)"
+        echo "PREEXISTING_FONT=$(_p "$FONT_DIR/FiraCode")"
+        echo "PREEXISTING_TREESITTER_CLI=$(command -v tree-sitter >/dev/null 2>&1 && echo 1 || echo 0)"
+        echo "PREEXISTING_TPM=$(_p "$HOME/.tmux/plugins/tpm")"
+        echo "PREEXISTING_P10K=$(_p "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k")"
+        echo "PREEXISTING_NVIM_DATA=$(_p "${XDG_DATA_HOME:-$HOME/.local/share}/nvim")"
+
+        if [[ "$OS" == "Darwin" ]]; then
+            iterm_guid_val="$(defaults read com.googlecode.iterm2 "Default Bookmark Guid" 2>/dev/null)"
+            if [ -n "$iterm_guid_val" ]; then
+                echo "ITERM_GUID_WAS_SET=1"
+                echo "ORIGINAL_ITERM_GUID=\"$iterm_guid_val\""
+            else
+                echo "ITERM_GUID_WAS_SET=0"
+            fi
+            iterm_clip_val="$(defaults read com.googlecode.iterm2 AllowClipboardAccess 2>/dev/null)"
+            if [ -n "$iterm_clip_val" ]; then
+                echo "ITERM_CLIP_WAS_SET=1"
+                echo "ORIGINAL_ITERM_CLIP=\"$iterm_clip_val\""
+            else
+                echo "ITERM_CLIP_WAS_SET=0"
+            fi
+        fi
+    } > "$ORIGINAL_STATE_FILE"
+fi
 
 # _sha256 <file>: portable hash (Linux has sha256sum, macOS has shasum).
 _sha256() {
@@ -90,11 +181,9 @@ if [[ "$OS" == "Darwin" ]]; then
     fi
 
     echo "[MacOS] Installing Core Utilities & Dev Tools..."
-    brew install git zsh wget node ripgrep fd neovim cmake llvm cppcheck rustup-init tmux gdb zoxide htop btop
-    brew install --cask kitty font-fira-code-nerd-font
-    # Symbols-only Nerd Font: kitty uses it as a glyph fallback so all NF icons
-    # render correctly regardless of which codepoints FiraCode patches in.
-    brew install --cask font-symbols-only-nerd-font 2>/dev/null || true
+    brew install "${BREW_FORMULAE[@]}"
+    brew install --cask "${BREW_CASKS[@]}"
+    brew install --cask "${BREW_CASKS_SOFT[@]}" 2>/dev/null || true
 
     # iTerm2: install TokyoNight Dynamic Profile + configure preferences so nothing
     # needs to be done manually inside the app.
@@ -115,17 +204,8 @@ if [[ "$OS" == "Darwin" ]]; then
 # Linux Setup
 # -----------------------------------------------------------------------------
 elif [[ "$OS" == "Linux" ]]; then
-    # Detect distro family by available package manager
-    if command -v apt-get &>/dev/null; then
-        DISTRO_FAMILY="debian"
-    elif command -v dnf &>/dev/null; then
-        DISTRO_FAMILY="rhel"; RHEL_PKG="dnf"
-    elif command -v yum &>/dev/null; then
-        DISTRO_FAMILY="rhel"; RHEL_PKG="yum"
-    else
-        DISTRO_FAMILY="unknown"
+    [[ "$DISTRO_FAMILY" == "unknown" ]] && \
         echo "[WARNING] No supported package manager found (apt-get/dnf/yum). Skipping system packages."
-    fi
 
     # ---- Debian / Ubuntu -----------------------------------------------------
     if [[ "$DISTRO_FAMILY" == "debian" ]]; then
@@ -133,16 +213,11 @@ elif [[ "$OS" == "Linux" ]]; then
         _apt_update_if_stale 24
 
         echo "[Linux/Debian] Installing System & Dev Dependencies..."
-        sudo apt-get install -y build-essential git zsh curl wget unzip tar \
-                            xclip nodejs npm ripgrep fd-find python3-venv \
-                            cmake clang lldb lld cppcheck pkg-config libssl-dev \
-                            tmux gdb zoxide htop btop numactl
+        sudo apt-get install -y "${DEBIAN_PKGS[@]}"
 
         # Performance / measurement tooling (perf_cmds.md)
         echo "[Linux/Debian] Installing performance / measurement tooling..."
-        sudo apt-get install -y \
-            linux-tools-common linux-tools-generic \
-            bpftrace bpfcc-tools trace-cmd sysstat \
+        sudo apt-get install -y "${DEBIAN_PERF_PKGS[@]}" \
             || echo "[WARNING] some perf tools unavailable; install manually (see perf_cmds.md)."
 
         # Install Neovim from unstable PPA — only add + refresh the repo the
@@ -154,7 +229,7 @@ elif [[ "$OS" == "Linux" ]]; then
             sudo apt-get update -y
         fi
         echo "[Linux/Debian] Installing/Upgrading Neovim..."
-        sudo apt-get install -y neovim
+        sudo apt-get install -y "${DEBIAN_NEOVIM_PKGS[@]}"
 
         # Kernel-version-specific perf tools (graceful failure for non-matching kernels)
         sudo apt-get install -y linux-tools-$(uname -r) || \
@@ -181,25 +256,21 @@ elif [[ "$OS" == "Linux" ]]; then
         # Key name differences vs Debian: gcc gcc-c++ make (≈build-essential),
         # pkgconf-pkg-config (≈pkg-config), openssl-devel (≈libssl-dev),
         # python3 python3-pip (≈python3-venv — venv is bundled in python3 on RHEL)
-        sudo "$RHEL_PKG" install -y gcc gcc-c++ make git zsh curl wget unzip tar \
-                            xclip nodejs npm ripgrep fd-find python3 python3-pip \
-                            cmake clang lldb lld cppcheck pkgconf-pkg-config openssl-devel \
-                            tmux gdb zoxide htop btop numactl
+        sudo "$RHEL_PKG" install -y "${RHEL_PKGS[@]}"
         # kitty-terminfo is in Fedora repos and EPEL; soft-install so SSH sessions
         # with TERM=xterm-kitty are recognised (clipboard, true colour, etc.).
-        sudo "$RHEL_PKG" install -y kitty-terminfo 2>/dev/null \
+        sudo "$RHEL_PKG" install -y "${RHEL_EXTRA_PKGS[@]}" 2>/dev/null \
             || echo "[INFO] kitty-terminfo not available; TERM=xterm-kitty may not be recognised."
 
         # Performance / measurement tooling
         # Key name differences: perf (≈linux-tools-*), bcc-tools (≈bpfcc-tools)
         echo "[Linux/RHEL] Installing performance / measurement tooling..."
-        sudo "$RHEL_PKG" install -y \
-            perf bpftrace bcc-tools trace-cmd sysstat \
+        sudo "$RHEL_PKG" install -y "${RHEL_PERF_PKGS[@]}" \
             || echo "[WARNING] some perf tools unavailable; install manually (see perf_cmds.md)."
 
         # Install Neovim; fall back to pre-built binary from GitHub if not in repos
         echo "[Linux/RHEL] Installing Neovim..."
-        if ! sudo "$RHEL_PKG" install -y neovim 2>/dev/null; then
+        if ! sudo "$RHEL_PKG" install -y "${RHEL_NEOVIM_PKGS[@]}" 2>/dev/null; then
             echo "[Linux/RHEL] Falling back to pre-built Neovim binary from GitHub..."
             NVIM_ARCHIVE="/tmp/nvim-linux-x86_64.tar.gz"
             curl -L https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz \
