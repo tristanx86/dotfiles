@@ -15,3 +15,5 @@ at dport 9000. Two engines, chosen explicitly each run:
 | `floodfd kernel` | Configure in-kernel pktgen threads (top-down cores, like `pktfd`) at a target Mpps (or MAX), start the flood, and show a live Mpps counter. |
 | `floodfd stop` | Stop the in-kernel pktgen flood (`floodfd kernel`'s Ctrl-C only stops watching, not the traffic). |
 | `floodfd restore` | Undo `floodfd dpdk`'s vfio-pci bind — return the NIC to its kernel driver. |
+
+Standalones: `floodsd`

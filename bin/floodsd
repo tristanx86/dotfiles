@@ -1,0 +1,557 @@
+#!/usr/bin/env bash
+# floodsd ("flood standalone") — standalone remote load-generator.
+#
+# A deliberately different name from `floodfd` (the zsh function in
+# zsh/firedancer-flood.zsh) so the two can coexist on the same machine
+# without colliding: same behavior and on-disk state format, ported to
+# plain bash — no zsh, no dotfiles, nothing sourced into any shell config.
+# Works from bash or zsh (or any shell) since it's a normal executable, not
+# a sourced function, and works on any distro with bash, `ip`, and (for
+# `floodsd dpdk`) apt/dnf/yum.
+#
+# Load-tests a remote firedancer validator from a *separate* box: always
+# sends 64B (min-sized) UDP packets at dport 9000. Two engines, chosen
+# explicitly each run:
+#   floodsd dpdk    DPDK pktgen (userspace, needs a NIC bound to vfio-pci/mlx5)
+#   floodsd kernel  in-kernel pktgen module (no DPDK/hugepages needed)
+#
+# `floodsd setup` resolves and saves the target once: pick the sending NIC,
+# enter the destination IP, then floodsd pings it and reads the resolved MAC
+# out of the neighbor table — which doubles as a reachability check before
+# you start flooding. Enter keeps the last value at every subsequent prompt.
+
+set -uo pipefail
+
+FLOODSD_STATE_FILE="$HOME/.config/floodsd/state"
+_floodsd_get() { grep "^$1=" "$FLOODSD_STATE_FILE" 2>/dev/null | cut -d= -f2-; }
+_floodsd_set() {
+    local key=$1 val=$2
+    mkdir -p "$(dirname "$FLOODSD_STATE_FILE")"
+    local tmp="${FLOODSD_STATE_FILE}.tmp"
+    { [ -f "$FLOODSD_STATE_FILE" ] && grep -v "^$key=" "$FLOODSD_STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } > "$tmp"
+    mv "$tmp" "$FLOODSD_STATE_FILE"
+}
+
+# ── Shared DPDK/NIC helpers ───────────────────────────
+
+# _fd_pick_iface <prefix> <label> [current]: list network interfaces and
+# prompt for one, printing the choice to stdout. Enter keeps [current] if given.
+_fd_pick_iface() {
+    local prefix=$1 label=$2 cur=$3
+    local ifaces=() i idx=1 drv
+    echo "Available interfaces:" >&2
+    for i in /sys/class/net/*; do
+        [ -e "$i" ] || continue
+        i=${i##*/}
+        [ "$i" = lo ] && continue
+        drv=$(basename "$(readlink -f "/sys/class/net/$i/device/driver" 2>/dev/null)" 2>/dev/null)
+        ifaces+=("$i")
+        printf "  %d) %-20s %s\n" "$idx" "$i" "${drv:+driver: $drv}" >&2
+        idx=$((idx + 1))
+    done
+    if [ "${#ifaces[@]}" -eq 0 ]; then
+        echo "$prefix: no network interfaces found." >&2
+        return 1
+    fi
+
+    local sel
+    read -rp "${label}${cur:+ (Enter = keep '$cur')} [1-${#ifaces[@]}]: " sel
+    if [ -z "$sel" ]; then
+        [ -z "$cur" ] && { echo "$prefix: no interface selected." >&2; return 1; }
+        echo "$cur"
+        return 0
+    fi
+    if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#ifaces[@]}" ]; then
+        echo "$prefix: invalid selection '$sel'." >&2
+        return 1
+    fi
+    echo "${ifaces[$((sel - 1))]}"
+}
+
+# _fd_is_mellanox <iface> <curdrv>: detects (and lets the user confirm/
+# override) whether <iface> is a bifurcated Mellanox PMD — DPDK drives it
+# while it stays on the kernel driver, so it never needs a vfio-pci rebind.
+_fd_is_mellanox() {
+    local iface=$1 curdrv=$2 mellanox=0
+    case "$curdrv" in mlx5_core|mlx5) mellanox=1 ;; esac
+    local defans; [ "$mellanox" = 1 ] && defans=Y || defans=N
+    [ -n "$curdrv" ] && echo "Detected kernel driver for $iface: $curdrv"
+    local ans
+    read -rp "Mellanox/mlx5 NIC (no vfio-pci rebind needed)? [$defans]: " ans
+    ans=${ans:-$defans}
+    case "$ans" in y|Y|yes|Yes) return 0 ;; *) return 1 ;; esac
+}
+
+# _fd_lcore_plan <prefix> <ntx>: lays out DPDK lcores top-down (fits a
+# 16-core box): main 15 | RX 14 | TX 13, 12, ... Every core past the main
+# and RX cores is a dedicated TX (generation) core, and TX throughput scales
+# with their count. DPDK would otherwise default the main lcore to the
+# lowest core in -l (a TX core here), so it's pinned explicitly with
+# --main-lcore. On success prints "<main> <rxcore> <txlo> <txrange> <lcores>
+# <map> <est>" to stdout; on failure (machine too small, or <ntx> would run
+# past core 0) prints an error prefixed with <prefix> and returns 1.
+_fd_lcore_plan() {
+    local prefix=$1 ntx=$2
+    local main=15 rxcore=14 txhi=13
+    local txlo=$((txhi - ntx + 1))
+    if [ ! -d "/sys/devices/system/cpu/cpu$main" ]; then
+        echo "$prefix: layout needs at least 16 cores (uses up to core $main); machine has $(nproc)." >&2
+        return 1
+    fi
+    if [ "$txlo" -lt 0 ]; then
+        echo "$prefix: $ntx TX cores would run past core 0 (lowest = $txlo). Choose fewer." >&2
+        return 1
+    fi
+    local lcores="${txlo}-${main}"
+    local txrange="$txhi"
+    [ "$txlo" -lt "$txhi" ] && txrange="${txlo}-${txhi}"
+    local map="[${rxcore}:${txrange}].0"
+    local est=$((ntx * 30))
+    echo "$main $rxcore $txlo $txrange $lcores $map $est"
+}
+
+# _fd_check_numa <prefix> <iface> <nicnode> <lo> <hi>: warns if any core in
+# [lo, hi] isn't on the NIC's NUMA node — cross-socket DMA skews throughput.
+_fd_check_numa() {
+    local prefix=$1 iface=$2 nicnode=$3 lo=$4 hi=$5
+    if [ -z "$nicnode" ] || [ "$nicnode" = "-1" ]; then return 0; fi
+    local c cnode badcores="" n
+    for ((c = lo; c <= hi; c++)); do
+        cnode=""
+        for n in /sys/devices/system/cpu/cpu$c/node*; do
+            [ -e "$n" ] || continue
+            cnode=${n##*/node}
+        done
+        [ -n "$cnode" ] && [ "$cnode" != "$nicnode" ] && badcores="${badcores} $c"
+    done
+    if [ -n "$badcores" ]; then
+        echo "$prefix: WARNING — $iface is on NUMA node $nicnode but core(s)$badcores are on another node."
+        echo "  Cross-socket DMA will skew results; pin to cores on node $nicnode for accurate numbers."
+    fi
+}
+
+# _fd_reserve_hugepages <ntx>: reserves 1024 x 2MB hugepages per TX core and
+# mounts a 2MB hugetlbfs at /mnt/huge if one isn't already mounted.
+_fd_reserve_hugepages() {
+    local ntx=$1
+    local npages=$(( 1024 * ntx ))
+    echo "Reserving $npages x 2MB hugepages ($((npages * 2)) MiB)..."
+    echo "$npages" | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages >/dev/null
+    if ! grep -q 'hugetlbfs.*pagesize=2M' /proc/mounts; then
+        sudo mkdir -p /mnt/huge && sudo mount -t hugetlbfs -o pagesize=2M nodev /mnt/huge
+    fi
+}
+
+# _fd_vfio_bind <tool> <iface> <pci> <curdrv> <statefile> [peer] [ip]: binds
+# <iface> to vfio-pci for DPDK and records pci/drv/if/ip/peer in <statefile>
+# so _fd_vfio_restore can undo it later. Only call this for non-Mellanox
+# NICs (see _fd_is_mellanox) — Mellanox never needs rebinding.
+_fd_vfio_bind() {
+    local tool=$1 iface=$2 pci=$3 curdrv=$4 state=$5 peer=$6 ip=$7
+    echo "Binding $iface ($pci, ${curdrv:-unknown}) to vfio-pci for DPDK..."
+    sudo modprobe vfio-pci 2>/dev/null
+    if ! ls /sys/kernel/iommu_groups/* >/dev/null 2>&1; then
+        echo "  NOTE: no IOMMU groups found. vfio-pci needs an IOMMU (boot with 'intel_iommu=on iommu=pt'),"
+        echo "        or enable no-IOMMU mode: echo 1 | sudo tee /sys/module/vfio/parameters/enable_unsafe_noiommu_mode"
+    fi
+    if command -v dpdk-devbind.py >/dev/null 2>&1; then
+        sudo dpdk-devbind.py --bind=vfio-pci "$pci"
+    else
+        echo vfio-pci | sudo tee "/sys/bus/pci/devices/$pci/driver_override" >/dev/null
+        [ -e "/sys/bus/pci/devices/$pci/driver" ] && \
+            echo "$pci" | sudo tee "/sys/bus/pci/devices/$pci/driver/unbind" >/dev/null
+        echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null
+    fi
+    printf 'pci=%s\ndrv=%s\nif=%s\nip=%s\npeer=%s\n' "$pci" "$curdrv" "$iface" "$ip" "$peer" > "$state"
+    echo "  To rebind the kernel driver + restore $iface later:  $tool restore"
+}
+
+# _fd_vfio_restore <prefix> <statefile>: undoes _fd_vfio_bind — rebinds the
+# interface to its kernel driver, renames the reborn netdev back, restores
+# its IP, and bounces a peer interface if one was recorded.
+_fd_vfio_restore() {
+    local prefix=$1 state=$2
+    if [ ! -f "$state" ]; then
+        echo "$prefix: no saved state ($state) — nothing was bound to vfio-pci."
+        return 1
+    fi
+
+    local pci drv iface ip peer k v
+    while IFS='=' read -r k v; do
+        case "$k" in
+            pci) pci=$v ;; drv) drv=$v ;;
+            if)  iface=$v ;; ip) ip=$v ;; peer) peer=$v ;;
+        esac
+    done < "$state"
+    if [ -z "$pci" ]; then
+        echo "$prefix: state file is malformed; remove $state and re-run setup."
+        return 1
+    fi
+
+    echo "Rebinding $pci to kernel driver '${drv:-?}'..."
+    if command -v dpdk-devbind.py >/dev/null 2>&1 && [ -n "$drv" ]; then
+        sudo dpdk-devbind.py --bind="$drv" "$pci"
+    else
+        echo "$pci" | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind >/dev/null 2>&1
+        echo "" | sudo tee "/sys/bus/pci/devices/$pci/driver_override" >/dev/null
+        if [ -n "$drv" ] && [ -d "/sys/bus/pci/drivers/$drv" ]; then
+            echo "$pci" | sudo tee "/sys/bus/pci/drivers/$drv/bind" >/dev/null 2>&1
+        fi
+        echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null 2>&1
+    fi
+
+    # The kernel re-creates the netdev under a fresh name; rename it back.
+    local newname="" n
+    for n in /sys/bus/pci/devices/$pci/net/*; do
+        [ -e "$n" ] || continue
+        newname=${n##*/}
+    done
+    if [ -z "$newname" ]; then
+        echo "$prefix: device rebound but no netdev appeared for $pci."
+        echo "  Check 'ip link'; you may need to re-run, or driver '$drv' failed to attach."
+        return 1
+    fi
+    iface=${iface:-$newname}
+    if [ "$newname" != "$iface" ]; then
+        echo "Renaming '$newname' -> '$iface'..."
+        sudo ip link set "$newname" down && \
+        sudo ip link set "$newname" name "$iface"
+    fi
+    sudo ip link set "$iface" up
+
+    if [ -n "$ip" ] && ! ip -4 -o addr show dev "$iface" | grep -q "${ip%%/*}"; then
+        echo "Re-adding $ip to $iface (lost when the netdev was destroyed)..."
+        sudo ip addr add "$ip" dev "$iface"
+    fi
+    if [ -n "$peer" ] && ip link show "$peer" >/dev/null 2>&1; then
+        echo "Bouncing $peer to re-establish carrier on the loopback link..."
+        sudo ip link set "$peer" down && sudo ip link set "$peer" up
+    fi
+
+    rm -f "$state"
+    echo "Done — $iface is back on the kernel driver."
+    [ -n "$peer" ] && echo "  $peer link restored."
+}
+
+# ── floodsd ───────────────────────────────────────────
+
+# floodsd setup: pick the sending NIC, take a destination IP, then ping it
+# and read the resolved MAC out of the neighbor table. The ping doubles as a
+# reachability check — if it fails, something's wrong with routing/cabling
+# before you ever get to flooding.
+_floodsd_setup() {
+    local iface
+    iface=$(_fd_pick_iface "floodsd" "Sending NIC" "$(_floodsd_get if)") || return 1
+
+    if ! ip link show "$iface" >/dev/null 2>&1; then
+        echo "floodsd setup: interface '$iface' not found."
+        return 1
+    fi
+
+    if ! ip -4 -o addr show dev "$iface" | grep -q .; then
+        local cidr
+        read -rp "$iface has no IPv4 (needed to ping/ARP the target). Assign one (e.g. 10.0.0.2/24): " cidr
+        [ -z "$cidr" ] && { echo "floodsd setup: no address given, aborting."; return 1; }
+        sudo ip addr add "$cidr" dev "$iface" || return 1
+    fi
+
+    local curdestip destip
+    curdestip=$(_floodsd_get destip)
+    read -rp "Destination IP (the validator under test)${curdestip:+ (Enter = keep '$curdestip')}: " destip
+    destip=${destip:-$curdestip}
+    [ -z "$destip" ] && { echo "floodsd setup: no destination IP given."; return 1; }
+
+    echo "Pinging $destip via $iface to resolve its MAC (also confirms reachability)..."
+    if ! ping -c2 -W2 -I "$iface" "$destip" >/dev/null 2>&1; then
+        echo "floodsd setup: $destip is not reachable from $iface — check routing/cabling before flooding."
+        return 1
+    fi
+
+    local destmac
+    destmac=$(ip neigh show "$destip" dev "$iface" 2>/dev/null | awk '/lladdr/{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}' | head -1)
+    if [ -z "$destmac" ]; then
+        echo "floodsd setup: ping succeeded but no ARP entry resolved for $destip on $iface."
+        return 1
+    fi
+
+    _floodsd_set if "$iface"
+    _floodsd_set destip "$destip"
+    _floodsd_set destmac "$destmac"
+    echo "Target confirmed: $destip ($destmac) reachable via $iface."
+}
+
+# floodsd kernel: in-kernel pktgen flood at a target Mpps. pktgen's kernel
+# threads (kpktgend_N) are pinned 1:1 to CPU N, so "core selection" here just
+# means which kpktgend_N thread a device gets loaded into — cores are picked
+# top-down (highest first) to match pktfd's convention and avoid low cores
+# other tools tend to pin to.
+_floodsd_kernel() {
+    local iface destip destmac
+    iface=$(_floodsd_get if); destip=$(_floodsd_get destip); destmac=$(_floodsd_get destmac)
+    if [ -z "$iface" ] || [ -z "$destip" ] || [ -z "$destmac" ]; then
+        echo "floodsd kernel: no target configured — run 'floodsd setup' first."
+        return 1
+    fi
+    if ! ip link show "$iface" >/dev/null 2>&1; then
+        echo "floodsd kernel: interface '$iface' not found (was it rebound to vfio-pci? check 'floodsd restore')."
+        return 1
+    fi
+
+    local curcores ncores
+    curcores=$(_floodsd_get kerncores); curcores=${curcores:-4}
+    read -rp "TX cores/threads? [${curcores}] " ncores
+    ncores=${ncores:-$curcores}
+    if ! [[ "$ncores" =~ ^[0-9]+$ ]] || [ "$ncores" -lt 1 ]; then
+        echo "floodsd kernel: invalid core count '$ncores'."
+        return 1
+    fi
+    _floodsd_set kerncores "$ncores"
+
+    local hi=$(( $(nproc) - 1 )) lo
+    lo=$((hi - ncores + 1))
+    if [ "$lo" -lt 0 ]; then
+        echo "floodsd kernel: $ncores cores would run past core 0 (highest core = $hi). Choose fewer."
+        return 1
+    fi
+
+    local currate rate
+    currate=$(_floodsd_get kernrate); currate=${currate:-MAX}
+    read -rp "Target Mpps (or MAX)? [${currate}] " rate
+    rate=${rate:-$currate}
+    _floodsd_set kernrate "$rate"
+
+    local delay_ns
+    if [ "$rate" = MAX ] || [ "$rate" = max ]; then
+        delay_ns=0
+        echo "Configuring $ncores threads (cores $lo-$hi) for MAXIMUM speed..."
+    else
+        delay_ns=$(awk -v mpps="$rate" -v cores="$ncores" 'BEGIN {
+            total_pps = mpps * 1000000;
+            pps_per_core = total_pps / cores;
+            printf "%d", 1000000000 / pps_per_core
+        }')
+        echo "Configuring $ncores threads (cores $lo-$hi) for target $rate Mpps (delay ${delay_ns}ns/core)..."
+    fi
+
+    sudo modprobe pktgen
+    echo "stop" | sudo tee /proc/net/pktgen/pgctrl >/dev/null 2>&1
+
+    local i core dev thread
+    for ((i = 0; i < ncores; i++)); do
+        core=$((hi - i))
+        thread="kpktgend_${core}"
+        dev="${iface}@${i}"
+
+        echo "rem_device_all" | sudo tee "/proc/net/pktgen/$thread" >/dev/null
+        echo "add_device $dev" | sudo tee "/proc/net/pktgen/$thread" >/dev/null
+
+        echo "count 0"          | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "clone_skb 10000"  | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "pkt_size 64"      | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "delay $delay_ns"  | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "queue_map_min $i" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "queue_map_max $i" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "dst $destip"      | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "dst_mac $destmac" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "udp_dst_min 9000" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "udp_dst_max 9000" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+    done
+
+    # Writing "start" blocks until "stop" is written, so background it and
+    # run the Mpps monitor in the foreground.
+    echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null &
+
+    echo "Flooding $destip ($destmac) via $iface — cores $lo-$hi, target ${rate} Mpps."
+    echo "Ctrl-C stops watching (traffic keeps flowing — run 'floodsd stop' to actually stop it)."
+    echo "------------------------------------------------------"
+
+    local p1 p2 diff mpps val
+    while true; do
+        p1=0
+        for ((i = 0; i < ncores; i++)); do
+            val=$(grep "pkts-sofar" "/proc/net/pktgen/${iface}@${i}" 2>/dev/null | awk '{print $2}')
+            p1=$((p1 + val))
+        done
+
+        sleep 1
+
+        p2=0
+        for ((i = 0; i < ncores; i++)); do
+            val=$(grep "pkts-sofar" "/proc/net/pktgen/${iface}@${i}" 2>/dev/null | awk '{print $2}')
+            p2=$((p2 + val))
+        done
+
+        diff=$((p2 - p1))
+        mpps=$(awk -v diff="$diff" 'BEGIN { printf "%.2f", diff / 1000000 }')
+        echo "Current TX speed: $mpps Mpps"
+    done
+}
+
+# floodsd stop: halt the in-kernel pktgen flood (devices stay configured).
+_floodsd_stop() {
+    echo "stop" | sudo tee /proc/net/pktgen/pgctrl >/dev/null 2>&1
+    echo "Kernel pktgen stopped."
+}
+
+# _floodsd_ensure_dpdk: install DPDK + build Pktgen-DPDK from source if the
+# 'pktgen' binary isn't on PATH. DPDK's dev packages are in standard distro
+# repos, but Pktgen-DPDK itself normally isn't, so it's built from source
+# into ~/.local/src (no root needed for the clone/build, only the final
+# 'ninja install').
+PKTGEN_SRC_DIR="$HOME/.local/src/pktgen-dpdk"
+_floodsd_ensure_dpdk() {
+    command -v pktgen >/dev/null 2>&1 && return 0
+
+    echo "floodsd dpdk: 'pktgen' not found on PATH."
+    echo "  This installs DPDK's dev packages via the system package manager,"
+    echo "  then clones + builds Pktgen-DPDK from source into $PKTGEN_SRC_DIR."
+    local ans
+    read -rp "Proceed? [y/N] " ans
+    case "$ans" in
+        y|Y|yes|Yes) ;;
+        *) echo "Aborted — install pktgen manually, or re-run to retry."; return 1 ;;
+    esac
+
+    local pkgmgr
+    if command -v apt-get >/dev/null 2>&1; then
+        pkgmgr=apt
+    elif command -v dnf >/dev/null 2>&1; then
+        pkgmgr=dnf
+    elif command -v yum >/dev/null 2>&1; then
+        pkgmgr=yum
+    else
+        echo "floodsd dpdk: no supported package manager found (apt-get/dnf/yum) — install DPDK + Pktgen-DPDK manually."
+        return 1
+    fi
+
+    echo "Installing DPDK + build dependencies ($pkgmgr)..."
+    case "$pkgmgr" in
+        apt)
+            sudo apt-get update -y
+            sudo apt-get install -y dpdk dpdk-dev meson ninja-build pkg-config libnuma-dev git \
+                || { echo "floodsd dpdk: package install failed — install DPDK manually and re-run."; return 1; }
+            ;;
+        dnf|yum)
+            sudo "$pkgmgr" install -y dpdk dpdk-devel meson ninja-build pkgconf-pkg-config numactl-devel git \
+                || { echo "floodsd dpdk: package install failed — install DPDK manually and re-run."; return 1; }
+            ;;
+    esac
+
+    mkdir -p "$(dirname "$PKTGEN_SRC_DIR")"
+    if [ -d "$PKTGEN_SRC_DIR/.git" ]; then
+        echo "Updating existing Pktgen-DPDK checkout..."
+        git -C "$PKTGEN_SRC_DIR" pull || return 1
+    else
+        echo "Cloning Pktgen-DPDK..."
+        git clone https://github.com/pktgen/Pktgen-DPDK.git "$PKTGEN_SRC_DIR" || return 1
+    fi
+
+    echo "Building Pktgen-DPDK (meson + ninja)..."
+    (
+        cd "$PKTGEN_SRC_DIR" || exit 1
+        rm -rf build
+        meson setup build || exit 1
+        ninja -C build || exit 1
+        sudo ninja -C build install || exit 1
+    ) || { echo "floodsd dpdk: build failed — see output above."; return 1; }
+    sudo ldconfig
+
+    if ! command -v pktgen >/dev/null 2>&1; then
+        echo "floodsd dpdk: built successfully but 'pktgen' still not on PATH — check /usr/local/bin is in PATH."
+        return 1
+    fi
+    echo "pktgen installed: $(command -v pktgen)"
+}
+
+# floodsd dpdk: bind the flood NIC to vfio-pci (skipped for Mellanox) and
+# launch DPDK pktgen aimed at the saved target. Same core-layout convention
+# as pktfd: main lcore highest, then RX, then TX cores going down — DPDK's
+# main lcore runs control/CLI (no traffic) and pktgen dedicates one core to
+# RX; every other core is TX (generation), and TX throughput scales with
+# their count. Leaves you at pktgen's interactive prompt — 'start 0' and
+# rate-limiting ('set 0 rate <pct>') are yours to run by hand.
+_floodsd_dpdk() {
+    local iface destip destmac
+    iface=$(_floodsd_get if); destip=$(_floodsd_get destip); destmac=$(_floodsd_get destmac)
+    if [ -z "$iface" ] || [ -z "$destip" ] || [ -z "$destmac" ]; then
+        echo "floodsd dpdk: no target configured — run 'floodsd setup' first."
+        return 1
+    fi
+
+    local curcores ntx
+    curcores=$(_floodsd_get dpdkcores); curcores=${curcores:-1}
+    echo "DPDK uses 1 lcore for control + 1 for RX; each extra TX core adds ~30 Mpps (64B)."
+    read -rp "How many TX (generation) cores? [${curcores}] " ntx
+    ntx=${ntx:-$curcores}
+    if ! [[ "$ntx" =~ ^[0-9]+$ ]] || [ "$ntx" -lt 1 ]; then
+        echo "floodsd dpdk: invalid TX core count '$ntx'."
+        return 1
+    fi
+    _floodsd_set dpdkcores "$ntx"
+
+    local plan main rxcore txlo txrange lcores map est
+    plan=$(_fd_lcore_plan "floodsd dpdk" "$ntx") || return 1
+    read -r main rxcore txlo txrange lcores map est <<< "$plan"
+
+    _floodsd_ensure_dpdk || return 1
+    if [ ! -e "/sys/class/net/$iface" ]; then
+        echo "floodsd dpdk: no netdev for '$iface' — already bound to vfio-pci from a previous run? Check 'floodsd restore'."
+        return 1
+    fi
+
+    local pci nicnode curdrv ifip
+    pci=$(basename "$(readlink -f /sys/class/net/$iface/device)")
+    nicnode=$(cat /sys/class/net/$iface/device/numa_node 2>/dev/null)
+    curdrv=$(basename "$(readlink -f /sys/class/net/$iface/device/driver)" 2>/dev/null)
+    ifip=$(ip -4 -o addr show dev "$iface" | awk '{print $4}' | head -1)
+
+    local mellanox=0
+    _fd_is_mellanox "$iface" "$curdrv" && mellanox=1
+
+    _fd_check_numa "floodsd dpdk" "$iface" "$nicnode" "$txlo" "$main"
+
+    echo "DPDK pktgen core plan on $iface:"
+    echo "  $main    main lcore (DPDK control/CLI — no traffic)"
+    echo "  $rxcore    RX core"
+    echo "  $txrange  TX core(s) x$ntx  ->  ~${est} Mpps max (rough 30 Mpps/core guide, capped by NIC line rate)"
+
+    _fd_reserve_hugepages "$ntx"
+
+    [ "$mellanox" != 1 ] && _fd_vfio_bind floodsd "$iface" "$pci" "$curdrv" /tmp/floodsd-bound "" "$ifip"
+
+    local cmds=/tmp/floodsd-dpdk.pkt
+    cat > "$cmds" <<EOF
+set 0 dst mac $destmac
+set 0 dst ip $destip
+set 0 proto udp
+set 0 dport 9000
+set 0 size 64
+disable 0 vlan
+set 0 src ip ${ifip:-0.0.0.0}
+EOF
+
+    echo "Launching pktgen on $iface ($pci) -> $destip ($destmac), lcores $lcores (main $main)..."
+    echo "(pktgen drops you at its interactive prompt — run 'start 0' yourself when ready.)"
+    sudo pktgen -l "$lcores" -n 4 -a "$pci" --main-lcore "$main" -- -m "$map" -f "$cmds"
+}
+
+# floodsd restore: undo a vfio-pci bind from `floodsd dpdk` — rebind the NIC
+# to its kernel driver and rename the reborn netdev back to its original name.
+_floodsd_restore() { _fd_vfio_restore "floodsd restore" /tmp/floodsd-bound; }
+
+floodsd() {
+    case "${1:-}" in
+        setup)   shift; _floodsd_setup "$@";   return ;;
+        dpdk)    shift; _floodsd_dpdk "$@";    return ;;
+        kernel)  shift; _floodsd_kernel "$@";  return ;;
+        stop)    shift; _floodsd_stop "$@";    return ;;
+        restore) shift; _floodsd_restore "$@"; return ;;
+        *)
+            echo "Usage: floodsd setup | dpdk | kernel | stop | restore"
+            return 1
+            ;;
+    esac
+}
+
+floodsd "$@"
+exit $?

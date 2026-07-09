@@ -27,3 +27,9 @@ mainly for setting up the terminal and host/SSH management (`s`/`sfd`, see
 ```bash
 git clone https://github.com/tristanx86/dotfiles.git ~/dotfiles 2>/dev/null || (cd ~/dotfiles && git fetch && git reset --hard origin/main) && chmod +x ~/dotfiles/install-client.sh && ~/dotfiles/install-client.sh && exec zsh
 ```
+
+Standalones: `floodsd`
+
+```bash
+git clone https://github.com/tristanx86/dotfiles.git ~/dotfiles 2>/dev/null || (cd ~/dotfiles && git fetch && git reset --hard origin/main) && chmod +x ~/dotfiles/install-floodsd.sh && ~/dotfiles/install-floodsd.sh
+```
