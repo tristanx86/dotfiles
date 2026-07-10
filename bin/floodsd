@@ -820,30 +820,25 @@ _floodsd_kernel() {
     _fd_kernel_set_delay "$iface" "$ncores" "$rate"
 
     echo "Configured $ncores TX cores (cores $lo-$hi) -> $destip ($destmac) via $iface."
-    echo "Commands: start | start <mpps|max> | stop | quit"
+    echo "Commands: start | start <mpps|max> | stop | rate | quit"
 
-    local running=0 p1=0 p2 diff mpps line rc prompt_shown=0
+    local running=0 p1=0 p2 diff mpps line last_t=0 now
     trap 'echo; _fd_kernel_cleanup_all && echo "Stopped — all pktgen devices cleared."; echo "Exiting."; trap - INT; return 0' INT
 
-    # Deliberately not using `read -p` here: it reprints its prompt on every
-    # single call, including every 1-second timeout tick, with no leading
-    # newline — so on an idle prompt it silently piled up duplicate prompts
-    # forever on one physical line, and while running it glued the periodic
-    # Mpps status (and the next prompt) onto whatever you were mid-typing,
-    # corrupting your input. Printing the prompt ourselves, only once until
-    # something (a submitted line or a status update) invalidates it, keeps
-    # each of those on its own line instead.
+    # A plain blocking read — no -t timeout. An earlier version polled with
+    # `read -t 1` to redraw a live Mpps counter every second, but that meant
+    # something printed asynchronously *while you were mid-typing a command*,
+    # which — even once the "same line" glitch was fixed — still yanked the
+    # display to a new line mid-keystroke every second, since canonical
+    # terminal mode gives us no way to know you're partway through typing.
+    # Trading the auto-updating ticker for an on-demand 'rate' command means
+    # nothing ever prints here except in direct response to a line you typed,
+    # so the prompt can't get disrupted while you're typing.
     while true; do
         local prompt="floodsd kernel"
         [ "$running" = 1 ] && prompt="floodsd kernel [running, ${rate} Mpps]"
 
-        if [ "$prompt_shown" = 0 ]; then
-            printf '%s> ' "$prompt"
-            prompt_shown=1
-        fi
-
-        if IFS= read -r -t 1 line; then
-            prompt_shown=0
+        if IFS= read -r -p "${prompt}> " line; then
             case "$line" in
                 start)
                     if [ "$running" = 1 ]; then
@@ -861,6 +856,7 @@ _floodsd_kernel() {
                         ( trap '' INT; echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null ) &
                         running=1
                         p1=$(_fd_kernel_pkt_total "$iface" "$ncores")
+                        last_t=$(date +%s.%N)
                         echo "Started at ${rate} Mpps."
                     fi
                     ;;
@@ -879,6 +875,7 @@ _floodsd_kernel() {
                         ( trap '' INT; echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null ) &
                         running=1
                         p1=$(_fd_kernel_pkt_total "$iface" "$ncores")
+                        last_t=$(date +%s.%N)
                         echo "Rate set to ${rate} Mpps."
                     fi
                     ;;
@@ -891,6 +888,21 @@ _floodsd_kernel() {
                         echo "Already stopped."
                     fi
                     ;;
+                rate)
+                    if [ "$running" = 1 ]; then
+                        p2=$(_fd_kernel_pkt_total "$iface" "$ncores")
+                        now=$(date +%s.%N)
+                        diff=$((p2 - p1))
+                        mpps=$(awk -v diff="$diff" -v t0="$last_t" -v t1="$now" 'BEGIN {
+                            dt = t1 - t0; if (dt <= 0) dt = 1
+                            printf "%.2f", (diff / 1000000) / dt
+                        }')
+                        echo "  ~$mpps Mpps (since last check)"
+                        p1=$p2; last_t=$now
+                    else
+                        echo "Not running."
+                    fi
+                    ;;
                 quit | exit)
                     _fd_kernel_cleanup_all && echo "Stopped — all pktgen devices cleared."
                     trap - INT
@@ -898,27 +910,14 @@ _floodsd_kernel() {
                     ;;
                 "") ;;
                 *)
-                    echo "Unknown command '$line'. Use: start | start <mpps|max> | stop | quit"
+                    echo "Unknown command '$line'. Use: start | start <mpps|max> | stop | rate | quit"
                     ;;
             esac
         else
-            rc=$?
-            if [ "$rc" -gt 128 ]; then
-                if [ "$running" = 1 ]; then
-                    p2=$(_fd_kernel_pkt_total "$iface" "$ncores")
-                    diff=$((p2 - p1))
-                    mpps=$(awk -v diff="$diff" 'BEGIN { printf "%.2f", diff / 1000000 }')
-                    echo
-                    echo "  [$mpps Mpps]"
-                    p1=$p2
-                    prompt_shown=0
-                fi
-            else
-                # EOF (Ctrl-D / stdin closed) — same as quit.
-                _fd_kernel_cleanup_all && echo "Stopped — all pktgen devices cleared."
-                trap - INT
-                return 0
-            fi
+            # EOF (Ctrl-D / stdin closed) — same as quit.
+            _fd_kernel_cleanup_all && echo "Stopped — all pktgen devices cleared."
+            trap - INT
+            return 0
         fi
     done
 }
