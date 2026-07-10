@@ -16,12 +16,15 @@
 #   floodsd dpdk    DPDK pktgen (userspace, needs a NIC bound to vfio-pci/mlx5)
 #   floodsd kernel  in-kernel pktgen module (no DPDK/hugepages needed)
 #
-# Bonded NICs: `floodsd kernel`/`setup` can target a bond master directly —
-# pktgen rides it like any other kernel netdevice. `floodsd dpdk` needs a
-# real PCI device, so pick one of the bond's slaves instead (see
-# _fd_pick_iface's bond labeling); if that slave is still enslaved,
-# `floodsd dpdk` offers to pull it out of the bond first and `floodsd
-# restore` puts it back (see _fd_bond_detach/_fd_bond_reattach).
+# Bonded NICs: `floodsd setup` can target a bond master directly — it's just
+# IP-level probing/ARP. Both flood engines can't, though: `floodsd dpdk`
+# needs a real PCI device, and `floodsd kernel` needs a real per-queue
+# hardware TX ring — a bond is a purely software netdevice with neither, and
+# pktgen driving one directly tends to surface as skb/protocol errors rather
+# than a clean failure. Pick one of the bond's slaves instead for either
+# engine (see _fd_pick_iface's bond labeling); if that slave is still
+# enslaved, `floodsd dpdk` offers to pull it out of the bond first and
+# `floodsd restore` puts it back (see _fd_bond_detach/_fd_bond_reattach).
 #
 # `floodsd setup` resolves and saves the target once: pick the sending NIC,
 # enter the destination IP, then floodsd sends it a UDP probe (source port
@@ -94,10 +97,11 @@ _fd_bond_tag() {
 
 # _fd_pick_iface <prefix> <label> [current]: list network interfaces and
 # prompt for one, printing the choice to stdout. Enter keeps [current] if given.
-# Bonding masters and their slaves are both listed (see _fd_bond_tag) —
-# `floodsd kernel`/`setup` want the bond master (kernel pktgen rides a bond
-# transparently); `floodsd dpdk` needs a real physical NIC, so pick a slave
-# for that (see the bond handling in _floodsd_dpdk).
+# Bonding masters and their slaves are both listed (see _fd_bond_tag) — only
+# `floodsd setup` wants the bond master (plain IP-level probing/ARP); both
+# `floodsd kernel` and `floodsd dpdk` need a real physical NIC, so pick a
+# slave for either of those (see the bond handling in _floodsd_kernel and
+# _floodsd_dpdk).
 _fd_pick_iface() {
     local prefix=$1 label=$2 cur=$3
     local ifaces=() i idx=1 drv bondtag state statetag
@@ -761,6 +765,16 @@ _floodsd_kernel() {
         return 1
     fi
 
+    if [ -d "/sys/class/net/$iface/bonding" ]; then
+        local slaves; slaves=$(cat "/sys/class/net/$iface/bonding/slaves" 2>/dev/null)
+        echo "floodsd kernel: '$iface' is a bonding master — kernel pktgen doesn't work reliably against it."
+        echo "  pktgen injects packets directly into a real per-queue hardware TX ring; a bond is a purely"
+        echo "  software netdevice with no such thing, and driving it this way tends to surface as skb/"
+        echo "  protocol errors rather than a clean failure."
+        echo "  Re-run 'floodsd setup' and pick one of its slaves${slaves:+ ($slaves)} instead."
+        return 1
+    fi
+
     local curcores ncores
     curcores=$(_floodsd_get kerncores); curcores=${curcores:-4}
     read -rp "TX cores/threads? [${curcores}] " ncores
@@ -1081,8 +1095,8 @@ _floodsd_dpdk() {
     if [ -d "/sys/class/net/$iface/bonding" ]; then
         local slaves; slaves=$(cat "/sys/class/net/$iface/bonding/slaves" 2>/dev/null)
         echo "floodsd dpdk: '$iface' is a bonding master — it has no PCI device, so DPDK can't bind it directly."
-        echo "  Either run 'floodsd kernel' instead (kernel pktgen rides a bond transparently), or"
-        echo "  re-run 'floodsd setup' and pick one of its slaves${slaves:+ ($slaves)} to flood a single raw link."
+        echo "  'floodsd kernel' can't target it either (a bond has no real hardware TX ring for pktgen to drive)."
+        echo "  Re-run 'floodsd setup' and pick one of its slaves${slaves:+ ($slaves)} to flood a single raw link."
         return 1
     fi
 
