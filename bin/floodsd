@@ -657,7 +657,10 @@ _fd_kernel_set_delay() {
 _fd_kernel_pkt_total() {
     local iface=$1 ncores=$2 i val total=0
     for ((i = 0; i < ncores; i++)); do
-        val=$(grep "pkts-sofar" "/proc/net/pktgen/${iface}@${i}" 2>/dev/null | awk '{print $2}')
+        # sudo'd: pktgen's proc entries are commonly root-read-only (0600), so
+        # an unprivileged read here just silently fails (2>/dev/null hides
+        # it), permanently pinning the Mpps counter at 0 on boxes like that.
+        val=$(sudo grep "pkts-sofar" "/proc/net/pktgen/${iface}@${i}" 2>/dev/null | awk '{print $2}')
         total=$((total + val))
     done
     echo "$total"
@@ -669,7 +672,12 @@ _fd_kernel_pkt_total() {
 _fd_kernel_thread_has_devices() {
     local f="/proc/net/pktgen/kpktgend_${1}"
     [ -e "$f" ] || return 1
-    awk -F': ' '/^Running:|^Stopped:/ { if (length($2) > 0) found=1 } END { exit !found }' "$f"
+    # sudo'd: these proc entries are commonly root-read-only (0600). Without
+    # it, an unprivileged read fails outright ("awk: fatal: cannot open ...
+    # Permission denied") instead of just returning false — and since this
+    # runs once per core per cleanup attempt, that's the exact failure that
+    # spams dozens of near-identical errors on a box with many cores.
+    sudo awk -F': ' '/^Running:|^Stopped:/ { if (length($2) > 0) found=1 } END { exit !found }' "$f"
 }
 
 # _fd_kernel_cleanup_all: stop sending and rem_device_all across *every*
@@ -701,7 +709,7 @@ _fd_kernel_cleanup_all() {
     done
 
     echo "floodsd kernel: WARNING — $leftover pktgen thread(s) still have devices attached after two cleanup attempts."
-    echo "  Check manually: grep -l 'Stopped: \\|Running: ' /proc/net/pktgen/kpktgend_* 2>/dev/null | xargs -r grep -H 'Stopped:\\|Running:'"
+    echo "  Check manually: sudo grep -l 'Stopped: \\|Running: ' /proc/net/pktgen/kpktgend_* 2>/dev/null | xargs -r sudo grep -H 'Stopped:\\|Running:'"
     return 1
 }
 
@@ -820,7 +828,16 @@ _floodsd_kernel() {
                     if [ "$running" = 1 ]; then
                         echo "Already running at ${rate} Mpps."
                     else
-                        echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null &
+                        # This write blocks until 'stop' is written elsewhere (pktgen's own
+                        # semantics), so it has to run in the background — but the script
+                        # isn't under interactive job control, so a backgrounded job shares
+                        # the foreground process group and Ctrl-C's SIGINT hits it directly.
+                        # Some sudo builds handle a raw SIGINT mid-flight badly enough to trip
+                        # glibc's fortify stack-protector ("longjmp causes uninitialized stack
+                        # frame"). The INT trap below already shuts this down gracefully (by
+                        # writing 'stop', which unblocks it cleanly) — ignoring INT here just
+                        # stops the terminal's raw signal from also hitting it first.
+                        ( trap '' INT; echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null ) &
                         running=1
                         p1=$(_fd_kernel_pkt_total "$iface" "$ncores")
                         echo "Started at ${rate} Mpps."
@@ -837,7 +854,8 @@ _floodsd_kernel() {
                             echo "stop" | sudo tee /proc/net/pktgen/pgctrl >/dev/null 2>&1
                         fi
                         _fd_kernel_set_delay "$iface" "$ncores" "$rate"
-                        echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null &
+                        # Backgrounded + INT-ignoring for the same reason as the 'start' case above.
+                        ( trap '' INT; echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null ) &
                         running=1
                         p1=$(_fd_kernel_pkt_total "$iface" "$ncores")
                         echo "Rate set to ${rate} Mpps."
