@@ -767,7 +767,14 @@ _floodsd_kernel() {
         thread="kpktgend_${core}"
         dev="${iface}@${i}"
 
-        echo "add_device $dev" | sudo tee "/proc/net/pktgen/$thread" >/dev/null
+        if ! echo "add_device $dev" | sudo tee "/proc/net/pktgen/$thread" >/dev/null; then
+            echo "floodsd kernel: couldn't write to /proc/net/pktgen/$thread — aborting instead of repeating this across every core."
+            echo "  If this is 'Permission denied' despite running as root, it's very likely SELinux (common on hardened RHEL-family boxes):"
+            echo "    getenforce                                 # check if it's Enforcing"
+            echo "    sudo ausearch -m avc -ts recent | grep -i pktgen   # see the actual denial"
+            echo "  A permissive test: 'sudo setenforce 0' (temporary, reverts on reboot) — or get a policy module allowing this from whoever owns the box."
+            return 1
+        fi
 
         echo "count 0"          | sudo tee "/proc/net/pktgen/$dev" >/dev/null
         echo "clone_skb 10000"  | sudo tee "/proc/net/pktgen/$dev" >/dev/null
@@ -786,14 +793,28 @@ _floodsd_kernel() {
     echo "Configured $ncores TX cores (cores $lo-$hi) -> $destip ($destmac) via $iface."
     echo "Commands: start | start <mpps|max> | stop | quit"
 
-    local running=0 p1=0 p2 diff mpps line rc
+    local running=0 p1=0 p2 diff mpps line rc prompt_shown=0
     trap 'echo; _fd_kernel_cleanup_all && echo "Stopped — all pktgen devices cleared."; echo "Exiting."; trap - INT; return 0' INT
 
+    # Deliberately not using `read -p` here: it reprints its prompt on every
+    # single call, including every 1-second timeout tick, with no leading
+    # newline — so on an idle prompt it silently piled up duplicate prompts
+    # forever on one physical line, and while running it glued the periodic
+    # Mpps status (and the next prompt) onto whatever you were mid-typing,
+    # corrupting your input. Printing the prompt ourselves, only once until
+    # something (a submitted line or a status update) invalidates it, keeps
+    # each of those on its own line instead.
     while true; do
         local prompt="floodsd kernel"
         [ "$running" = 1 ] && prompt="floodsd kernel [running, ${rate} Mpps]"
 
-        if IFS= read -r -t 1 -p "${prompt}> " line; then
+        if [ "$prompt_shown" = 0 ]; then
+            printf '%s> ' "$prompt"
+            prompt_shown=1
+        fi
+
+        if IFS= read -r -t 1 line; then
+            prompt_shown=0
             case "$line" in
                 start)
                     if [ "$running" = 1 ]; then
@@ -848,8 +869,10 @@ _floodsd_kernel() {
                     p2=$(_fd_kernel_pkt_total "$iface" "$ncores")
                     diff=$((p2 - p1))
                     mpps=$(awk -v diff="$diff" 'BEGIN { printf "%.2f", diff / 1000000 }')
+                    echo
                     echo "  [$mpps Mpps]"
                     p1=$p2
+                    prompt_shown=0
                 fi
             else
                 # EOF (Ctrl-D / stdin closed) — same as quit.
