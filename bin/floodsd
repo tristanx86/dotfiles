@@ -16,15 +16,22 @@
 #   floodsd dpdk    DPDK pktgen (userspace, needs a NIC bound to vfio-pci/mlx5)
 #   floodsd kernel  in-kernel pktgen module (no DPDK/hugepages needed)
 #
-# Bonded NICs: `floodsd setup` can target a bond master directly — it's just
-# IP-level probing/ARP. Both flood engines can't, though: `floodsd dpdk`
-# needs a real PCI device, and `floodsd kernel` needs a real per-queue
-# hardware TX ring — a bond is a purely software netdevice with neither, and
-# pktgen driving one directly tends to surface as skb/protocol errors rather
-# than a clean failure. Pick one of the bond's slaves instead for either
-# engine (see _fd_pick_iface's bond labeling); if that slave is still
-# enslaved, `floodsd dpdk` offers to pull it out of the bond first and
-# `floodsd restore` puts it back (see _fd_bond_detach/_fd_bond_reattach).
+# Bonded NICs: both the bond master and its slaves work as a `floodsd setup`
+# target, but a slave alone can't resolve the target's MAC — bonding's RX
+# handler reassigns every inbound skb it receives (ARP/probe replies
+# included) to the bond master's netdevice, so a slave never sees its own
+# replies. `setup` detects this and probes via the master instead when a
+# slave is picked, while still recording the slave itself as what floods
+# later (see the bondmaster/probeif handling in _floodsd_setup). Conversely,
+# neither flood engine can drive a bond master directly — `floodsd dpdk`
+# needs a real PCI device and `floodsd kernel` needs a real per-queue
+# hardware TX ring, and a bond is a purely software netdevice with neither
+# (pktgen driving one directly tends to surface as skb/protocol errors
+# rather than a clean failure) — so if the saved target is a bond master,
+# both engines prompt for one of its slaves to actually flood from instead
+# (see _fd_bond_pick_slave). If that slave is still enslaved, `floodsd dpdk`
+# offers to pull it out of the bond first and `floodsd restore` puts it back
+# (see _fd_bond_detach/_fd_bond_reattach).
 #
 # `floodsd setup` resolves and saves the target once: pick the sending NIC,
 # enter the destination IP, then floodsd sends it a UDP probe (source port
@@ -97,11 +104,12 @@ _fd_bond_tag() {
 
 # _fd_pick_iface <prefix> <label> [current]: list network interfaces and
 # prompt for one, printing the choice to stdout. Enter keeps [current] if given.
-# Bonding masters and their slaves are both listed (see _fd_bond_tag) — only
-# `floodsd setup` wants the bond master (plain IP-level probing/ARP); both
-# `floodsd kernel` and `floodsd dpdk` need a real physical NIC, so pick a
-# slave for either of those (see the bond handling in _floodsd_kernel and
-# _floodsd_dpdk).
+# Bonding masters and their slaves are both listed (see _fd_bond_tag), and
+# either is a fine choice here — `floodsd setup` resolves via the bond
+# master either way (a slave alone can't see its own inbound replies), and
+# `floodsd kernel`/`floodsd dpdk` will prompt for one of the bond's slaves at
+# flood time if the saved target turns out to be the master itself (see
+# _fd_bond_pick_slave and the bond handling in _floodsd_kernel/_floodsd_dpdk).
 _fd_pick_iface() {
     local prefix=$1 label=$2 cur=$3
     local ifaces=() i idx=1 drv bondtag state statetag
@@ -383,6 +391,37 @@ _fd_bond_reattach() {
     echo "Done — $iface is back in bond $bond."
 }
 
+# _fd_bond_pick_slave <bond> [current]: <bond> has no real per-queue
+# hardware TX ring for a flood engine to drive directly, so this prompts for
+# one of its slaves to actually flood from instead, printing the choice to
+# stdout. Enter keeps [current] if given.
+_fd_bond_pick_slave() {
+    local bond=$1 cur=$2
+    local slaves; slaves=$(cat "/sys/class/net/$bond/bonding/slaves" 2>/dev/null)
+    if [ -z "$slaves" ]; then
+        echo "floodsd: bond '$bond' has no slaves to flood from." >&2
+        return 1
+    fi
+    local arr=($slaves) idx=1 s
+    echo "'$bond' is a bond — pick which of its slaves to actually flood from:" >&2
+    for s in "${arr[@]}"; do
+        printf "  %d) %s\n" "$idx" "$s" >&2
+        idx=$((idx + 1))
+    done
+    local sel
+    read -rp "Slave${cur:+ (Enter = keep '$cur')} [1-${#arr[@]}]: " sel
+    if [ -z "$sel" ]; then
+        [ -z "$cur" ] && { echo "floodsd: no slave selected." >&2; return 1; }
+        echo "$cur"
+        return 0
+    fi
+    if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#arr[@]}" ]; then
+        echo "floodsd: invalid selection '$sel'." >&2
+        return 1
+    fi
+    echo "${arr[$((sel - 1))]}"
+}
+
 # ── floodsd ───────────────────────────────────────────
 
 # _fd_udp_probe <iface> <destip> <destport> <srcport>: sends one UDP
@@ -503,23 +542,38 @@ _floodsd_setup() {
         return 1
     fi
 
-    if ! ip -4 -o addr show dev "$iface" | grep -q .; then
-        local cidr
-        read -rp "$iface has no IPv4 (needed to ping/ARP the target). Assign one (e.g. 10.0.0.2/24): " cidr
-        [ -z "$cidr" ] && { echo "floodsd setup: no address given, aborting."; return 1; }
-        sudo ip addr add "$cidr" dev "$iface" || return 1
+    # A bonded slave can send fine, but bonding's RX handler reassigns every
+    # inbound skb it receives (including ARP/UDP replies) to the bond
+    # master's netdevice — so a slave itself never sees them, and resolving
+    # via the slave directly can never work. Resolve via the bond instead
+    # when a slave is picked; $iface (the slave) is still what actually
+    # floods later, once resolved.
+    local probeif="$iface" bondmaster
+    bondmaster=$(readlink -f "/sys/class/net/$iface/master" 2>/dev/null)
+    if [ -n "$bondmaster" ]; then
+        probeif=${bondmaster##*/}
+        echo "'$iface' is a bonded slave — its inbound traffic (so ARP/probe replies too) lands on '$probeif', not '$iface'."
+        echo "Resolving via '$probeif'; '$iface' is still what floods once resolved."
     fi
 
-    local curdestip destip
+    if ! ip -4 -o addr show dev "$probeif" | grep -q .; then
+        local cidr
+        read -rp "$probeif has no IPv4 (needed to ping/ARP the target). Assign one (e.g. 10.0.0.2/24): " cidr
+        [ -z "$cidr" ] && { echo "floodsd setup: no address given, aborting."; return 1; }
+        sudo ip addr add "$cidr" dev "$probeif" || return 1
+    fi
+
+    local curdestip destip curdestmac
     curdestip=$(_floodsd_get destip)
+    curdestmac=$(_floodsd_get destmac)
     read -rp "Destination IP (the validator under test)${curdestip:+ (Enter = keep '$curdestip')}: " destip
     destip=${destip:-$curdestip}
     [ -z "$destip" ] && { echo "floodsd setup: no destination IP given."; return 1; }
 
     local nexthop
-    nexthop=$(_fd_nexthop_ip "$iface" "$destip")
+    nexthop=$(_fd_nexthop_ip "$probeif" "$destip")
     if [ -z "$nexthop" ]; then
-        echo "floodsd setup: no route to $destip out $iface — check routing/cabling before flooding."
+        echo "floodsd setup: no route to $destip out $probeif — check routing/cabling before flooding."
         return 1
     fi
     if [ "$nexthop" != "$destip" ]; then
@@ -529,31 +583,52 @@ _floodsd_setup() {
     # A prior failed attempt can leave a FAILED/INCOMPLETE neighbor entry
     # behind, which makes the kernel back off re-ARPing it for a while —
     # silently turning "retry" into a no-op. Flushing first keeps retries real.
-    sudo ip neigh flush to "$nexthop" dev "$iface" >/dev/null 2>&1
+    sudo ip neigh flush to "$nexthop" dev "$probeif" >/dev/null 2>&1
 
-    echo "Probing $destip:$FLOOD_DPORT via $iface (UDP, src port $FLOOD_SPORT) to resolve $nexthop's MAC..."
-    if ! _fd_udp_probe "$iface" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT"; then
-        echo "floodsd setup: couldn't send a UDP probe to $destip:$FLOOD_DPORT from $iface — check routing/cabling before flooding."
+    echo "Probing $destip:$FLOOD_DPORT via $probeif (UDP, src port $FLOOD_SPORT) to resolve $nexthop's MAC..."
+    if ! _fd_udp_probe "$probeif" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT"; then
+        echo "floodsd setup: couldn't send a UDP probe to $destip:$FLOOD_DPORT from $probeif — check routing/cabling before flooding."
         return 1
     fi
 
     local destmac tries
     for tries in 1 2 3 4 5 6; do
-        destmac=$(ip neigh show "$nexthop" dev "$iface" 2>/dev/null | awk '/lladdr/{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}' | head -1)
+        destmac=$(ip neigh show "$nexthop" dev "$probeif" 2>/dev/null | awk '/lladdr/{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}' | head -1)
         [ -n "$destmac" ] && break
         sleep 0.5
-        _fd_udp_probe "$iface" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT" >/dev/null 2>&1
+        _fd_udp_probe "$probeif" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT" >/dev/null 2>&1
     done
     if [ -z "$destmac" ]; then
-        echo "floodsd setup: probe(s) sent but no ARP entry resolved for $nexthop on $iface — check routing/cabling before flooding."
-        _fd_diagnose_probe "$iface" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT" "$nexthop"
-        return 1
+        echo "floodsd setup: probe(s) sent but no ARP entry resolved for $nexthop on $probeif — check routing/cabling before flooding."
+        _fd_diagnose_probe "$probeif" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT" "$nexthop"
+
+        # Resolution can fail for reasons that have nothing to do with
+        # whether the target's MAC actually changed (a transient hiccup, a
+        # stale neighbor entry, momentary congestion) — if the destination
+        # is unchanged from last time and we already have a MAC for it from
+        # a prior successful setup, offer to just keep using that instead of
+        # hard-failing.
+        if [ -n "$curdestmac" ] && [ "$destip" = "$curdestip" ]; then
+            local ans
+            read -rp "Resolution failed, but a cached MAC for $destip from a previous setup exists ($curdestmac) — use it instead? [y/N]: " ans
+            case "$ans" in
+                y|Y|yes|Yes)
+                    destmac=$curdestmac
+                    echo "Using cached MAC $destmac for $destip."
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+        else
+            return 1
+        fi
     fi
 
     _floodsd_set if "$iface"
     _floodsd_set destip "$destip"
     _floodsd_set destmac "$destmac"
-    echo "Target confirmed: $destip via $nexthop ($destmac) reachable via $iface."
+    echo "Target confirmed: $destip via $nexthop ($destmac) reachable via $probeif — will flood from $iface."
 }
 
 # floodsd setup-srcport: override the UDP source port the probe, kernel
@@ -766,13 +841,15 @@ _floodsd_kernel() {
     fi
 
     if [ -d "/sys/class/net/$iface/bonding" ]; then
-        local slaves; slaves=$(cat "/sys/class/net/$iface/bonding/slaves" 2>/dev/null)
-        echo "floodsd kernel: '$iface' is a bonding master — kernel pktgen doesn't work reliably against it."
-        echo "  pktgen injects packets directly into a real per-queue hardware TX ring; a bond is a purely"
-        echo "  software netdevice with no such thing, and driving it this way tends to surface as skb/"
-        echo "  protocol errors rather than a clean failure."
-        echo "  Re-run 'floodsd setup' and pick one of its slaves${slaves:+ ($slaves)} instead."
-        return 1
+        # pktgen injects packets directly into a real per-queue hardware TX
+        # ring; a bond is a purely software netdevice with no such thing, and
+        # driving it directly tends to surface as skb/protocol errors rather
+        # than a clean failure — so flood from one of its slaves instead.
+        local bondiface="$iface" slave
+        slave=$(_fd_bond_pick_slave "$bondiface" "$(_floodsd_get kernslave)") || return 1
+        _floodsd_set kernslave "$slave"
+        echo "Flooding via '$slave' — '$bondiface' itself has no real hardware TX ring for pktgen to drive."
+        iface="$slave"
     fi
 
     local curcores ncores
@@ -1093,11 +1170,13 @@ _floodsd_dpdk() {
     fi
 
     if [ -d "/sys/class/net/$iface/bonding" ]; then
-        local slaves; slaves=$(cat "/sys/class/net/$iface/bonding/slaves" 2>/dev/null)
-        echo "floodsd dpdk: '$iface' is a bonding master — it has no PCI device, so DPDK can't bind it directly."
-        echo "  'floodsd kernel' can't target it either (a bond has no real hardware TX ring for pktgen to drive)."
-        echo "  Re-run 'floodsd setup' and pick one of its slaves${slaves:+ ($slaves)} to flood a single raw link."
-        return 1
+        # A bond has no PCI device for DPDK to bind — flood from one of its
+        # slaves instead (which does).
+        local bondiface="$iface" slave
+        slave=$(_fd_bond_pick_slave "$bondiface" "$(_floodsd_get dpdkslave)") || return 1
+        _floodsd_set dpdkslave "$slave"
+        echo "Flooding via '$slave' — '$bondiface' itself has no PCI device for DPDK to bind."
+        iface="$slave"
     fi
 
     _fd_bond_detach "$iface"
