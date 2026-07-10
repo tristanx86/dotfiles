@@ -328,6 +328,11 @@ _fd_bond_detach() {
 
     echo "Removing $iface from bond $master..."
     echo "-$iface" | sudo tee "/sys/class/net/$master/bonding/slaves" >/dev/null
+    # Verify the release actually took rather than assuming the sysfs write
+    # worked — same reasoning as _fd_kernel_cleanup_all's post-write check.
+    if [ -n "$(readlink -f "/sys/class/net/$iface/master" 2>/dev/null)" ]; then
+        echo "  WARNING: '$iface' still shows as enslaved to '$master' after asking the bond to release it — DPDK may still conflict with it."
+    fi
     mkdir -p "$(dirname "$FLOODSD_BOND_STATE")"
     printf 'if=%s\nbond=%s\n' "$iface" "$master" > "$FLOODSD_BOND_STATE"
     echo "  Recorded — 'floodsd restore' will re-add it to '$master' afterward."
@@ -356,7 +361,21 @@ _fd_bond_reattach() {
     echo "Re-adding $iface to bond $bond..."
     sudo ip link set "$iface" down
     echo "+$iface" | sudo tee "/sys/class/net/$bond/bonding/slaves" >/dev/null
+
+    # Verify the sysfs write actually took rather than assuming it worked —
+    # same reasoning as _fd_kernel_cleanup_all's post-write check.
+    local nowmaster
+    nowmaster=$(readlink -f "/sys/class/net/$iface/master" 2>/dev/null)
     rm -f "$FLOODSD_BOND_STATE"
+    if [ -z "$nowmaster" ]; then
+        echo "floodsd restore: WARNING — '$iface' doesn't show as enslaved to any bond after re-adding it to '$bond'."
+        echo "  Check manually: ip link show $iface ; cat /sys/class/net/$bond/bonding/slaves"
+        return 1
+    fi
+    if [ "${nowmaster##*/}" != "$bond" ]; then
+        echo "floodsd restore: WARNING — '$iface' ended up enslaved to '${nowmaster##*/}', not '$bond' — check manually."
+        return 1
+    fi
     echo "Done — $iface is back in bond $bond."
 }
 
@@ -557,11 +576,14 @@ _floodsd_setup_srcport() {
 }
 
 # _fd_ensure_pktgen_module: modprobe the in-kernel pktgen module, installing
-# it first if missing. On RHEL-family distros (RHEL/Rocky/Alma 9) pktgen.ko
-# ships in "kernel-modules-extra" rather than the base kernel package, so
-# minimal installs commonly don't have it; Debian/Ubuntu ship it in
-# "linux-modules-extra-$(uname -r)", also sometimes absent on minimal
-# cloud images. Package name is matched to the running kernel version so it
+# it first if missing. Debian/Ubuntu ship it in "linux-modules-extra-$(uname
+# -r)", sometimes absent on minimal cloud images. RHEL-family is messier and
+# has moved the package across releases: older RHEL/Rocky/Alma 9 shipped it
+# in "kernel-modules-extra", but newer RHEL-9-derivative point releases
+# (e.g. current Rocky Linux 9) moved pktgen and other net testing/debugging
+# modules into "kernel-modules-internal" instead — so both are tried,
+# internal first since that's where it lives on current RHEL-family
+# releases. Package name is matched to the running kernel version so it
 # isn't left on a mismatched/newer kernel package after an update.
 _fd_ensure_pktgen_module() {
     sudo modprobe pktgen 2>/dev/null && return 0
@@ -573,11 +595,13 @@ _fd_ensure_pktgen_module() {
         sudo apt-get install -y "linux-modules-extra-${krel}" \
             || { echo "floodsd kernel: couldn't install linux-modules-extra-${krel} — install it manually."; return 1; }
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y "kernel-modules-extra-${krel}" \
-            || { echo "floodsd kernel: couldn't install kernel-modules-extra-${krel} — install it manually."; return 1; }
+        sudo dnf install -y "kernel-modules-internal-${krel}" 2>/dev/null \
+            || sudo dnf install -y "kernel-modules-extra-${krel}" \
+            || { echo "floodsd kernel: couldn't install kernel-modules-internal-${krel} or kernel-modules-extra-${krel} — install it manually."; return 1; }
     elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y "kernel-modules-extra-${krel}" \
-            || { echo "floodsd kernel: couldn't install kernel-modules-extra-${krel} — install it manually."; return 1; }
+        sudo yum install -y "kernel-modules-internal-${krel}" 2>/dev/null \
+            || sudo yum install -y "kernel-modules-extra-${krel}" \
+            || { echo "floodsd kernel: couldn't install kernel-modules-internal-${krel} or kernel-modules-extra-${krel} — install it manually."; return 1; }
     else
         echo "floodsd kernel: no supported package manager found (apt-get/dnf/yum) — install the pktgen kernel module manually."
         return 1
@@ -1028,13 +1052,20 @@ EOF
 # (Mellanox NICs skip the vfio-pci step entirely, so for those this bond
 # reattach is the only restore step there is).
 _floodsd_restore() {
-    local any=0
-    [ -f "$FLOODSD_VFIO_STATE" ] && { _fd_vfio_restore "floodsd restore" "$FLOODSD_VFIO_STATE" && any=1; }
-    [ -f "$FLOODSD_BOND_STATE" ] && { _fd_bond_reattach && any=1; }
-    if [ "$any" = 0 ]; then
+    local attempted=0 failed=0
+    if [ -f "$FLOODSD_VFIO_STATE" ]; then
+        attempted=1
+        _fd_vfio_restore "floodsd restore" "$FLOODSD_VFIO_STATE" || failed=1
+    fi
+    if [ -f "$FLOODSD_BOND_STATE" ]; then
+        attempted=1
+        _fd_bond_reattach || failed=1
+    fi
+    if [ "$attempted" = 0 ]; then
         echo "floodsd restore: nothing to restore (no vfio-pci bind or bond detach recorded)."
         return 1
     fi
+    [ "$failed" = 1 ] && return 1
     return 0
 }
 
@@ -1069,10 +1100,13 @@ _floodsd_diagnose() {
     local bondtag; bondtag=$(_fd_bond_tag "$iface")
     [ -n "$bondtag" ] && echo "  $bondtag"
 
-    local rpall rpif
+    local rpall rpif rpeff
     rpall=$(cat /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null)
     rpif=$(cat "/proc/sys/net/ipv4/conf/$iface/rp_filter" 2>/dev/null)
-    echo "  rp_filter: all=${rpall:-?} $iface=${rpif:-?}$( [ "${rpif:-0}" = 1 ] && echo '  <-- strict mode; asymmetric-routed replies may get dropped' )"
+    # The kernel applies max(all, per-interface), not just the per-interface
+    # value — e.g. all=1 with iface=0 is still strict mode.
+    rpeff=$(( ${rpall:-0} > ${rpif:-0} ? ${rpall:-0} : ${rpif:-0} ))
+    echo "  rp_filter: all=${rpall:-?} $iface=${rpif:-?}$( [ "$rpeff" = 1 ] && echo '  <-- effective mode is strict; asymmetric-routed replies may get dropped' )"
 
     if [ -n "$destip" ]; then
         echo
