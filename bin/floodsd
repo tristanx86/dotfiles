@@ -10,21 +10,28 @@
 # `floodsd dpdk`) apt/dnf/yum.
 #
 # Load-tests a remote firedancer validator from a *separate* box: always
-# sends 64B (min-sized) UDP packets at dport 9000. Two engines, chosen
-# explicitly each run:
+# sends 64B (min-sized) UDP packets to dport 9000, sourced from port 8424 —
+# this box's egress firewall only allows outbound traffic sourced from that
+# port (see FLOOD_SPORT below). Two engines, chosen explicitly each run:
 #   floodsd dpdk    DPDK pktgen (userspace, needs a NIC bound to vfio-pci/mlx5)
 #   floodsd kernel  in-kernel pktgen module (no DPDK/hugepages needed)
 #
 # `floodsd setup` resolves and saves the target once: pick the sending NIC,
-# enter the destination IP, then floodsd pings it and reads the resolved MAC
-# out of the neighbor table — which doubles as a reachability check before
-# you start flooding. Enter keeps the last value at every subsequent prompt.
+# enter the destination IP, then floodsd sends it a UDP probe (source port
+# pinned to $FLOOD_SPORT — ICMP ping has no source port to pin, so it's
+# dropped outbound by this box's egress firewall even though inbound ICMP
+# works) and reads the resolved MAC out of the neighbor table, which doubles
+# as a reachability check before you start flooding. Enter keeps the last
+# value at every subsequent prompt.
 #
 # `floodsd kernel` drops you into an interactive prompt (start / start
 # <mpps|max> / stop / quit) rather than a one-shot run — see its own header
 # comment below for the command set.
 
 set -uo pipefail
+
+FLOOD_DPORT=9000  # target port on the validator under test
+FLOOD_SPORT=8424  # source port everything egresses from — this box's firewall only allows outbound traffic sourced from this port
 
 FLOODSD_STATE_DIR="$HOME/.config/floodsd"
 FLOODSD_STATE_FILE="$FLOODSD_STATE_DIR/state"
@@ -243,10 +250,43 @@ _fd_vfio_restore() {
 
 # ── floodsd ───────────────────────────────────────────
 
-# floodsd setup: pick the sending NIC, take a destination IP, then ping it
-# and read the resolved MAC out of the neighbor table. The ping doubles as a
-# reachability check — if it fails, something's wrong with routing/cabling
-# before you ever get to flooding.
+# _fd_udp_probe <iface> <destip> <destport> <srcport>: sends one UDP
+# datagram bound to <srcport> and <iface> (SO_BINDTODEVICE, needs root) to
+# <destip>:<destport>. Used in place of ICMP ping for the setup reachability
+# check: this box's egress firewall keys off source port, which ICMP has no
+# concept of, so ping is dropped outbound even though inbound ICMP works. A
+# UDP datagram sourced from the flood's own port ($FLOOD_SPORT) gets through
+# and is enough to trigger ARP resolution — no reply on <destport> is
+# required or expected.
+_fd_udp_probe() {
+    local iface=$1 destip=$2 destport=$3 srcport=$4
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "floodsd: python3 not found (needed to send a UDP probe from a pinned source port) — install python3 and re-run." >&2
+        return 1
+    fi
+    sudo python3 - "$iface" "$destip" "$destport" "$srcport" <<'PYEOF'
+import socket, sys
+iface, destip, destport, srcport = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.setsockopt(socket.SOL_SOCKET, 25, iface.encode())  # SO_BINDTODEVICE
+except OSError:
+    pass
+try:
+    s.bind(('0.0.0.0', srcport))
+    s.sendto(b'floodsd-probe', (destip, destport))
+except OSError as e:
+    sys.exit(f"floodsd: UDP probe failed: {e}")
+finally:
+    s.close()
+PYEOF
+}
+
+# floodsd setup: pick the sending NIC, take a destination IP, then send it a
+# UDP probe (see _fd_udp_probe) and read the resolved MAC out of the
+# neighbor table. The probe doubles as a reachability check — if no ARP
+# entry ever resolves, something's wrong with routing/cabling before you
+# ever get to flooding.
 _floodsd_setup() {
     local iface
     iface=$(_fd_pick_iface "floodsd" "Sending NIC" "$(_floodsd_get if)") || return 1
@@ -269,16 +309,21 @@ _floodsd_setup() {
     destip=${destip:-$curdestip}
     [ -z "$destip" ] && { echo "floodsd setup: no destination IP given."; return 1; }
 
-    echo "Pinging $destip via $iface to resolve its MAC (also confirms reachability)..."
-    if ! ping -c2 -W2 -I "$iface" "$destip" >/dev/null 2>&1; then
-        echo "floodsd setup: $destip is not reachable from $iface — check routing/cabling before flooding."
+    echo "Probing $destip:$FLOOD_DPORT via $iface (UDP, src port $FLOOD_SPORT) to resolve its MAC..."
+    if ! _fd_udp_probe "$iface" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT"; then
+        echo "floodsd setup: couldn't send a UDP probe to $destip:$FLOOD_DPORT from $iface — check routing/cabling before flooding."
         return 1
     fi
 
-    local destmac
-    destmac=$(ip neigh show "$destip" dev "$iface" 2>/dev/null | awk '/lladdr/{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}' | head -1)
+    local destmac tries
+    for tries in 1 2 3 4 5 6; do
+        destmac=$(ip neigh show "$destip" dev "$iface" 2>/dev/null | awk '/lladdr/{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}' | head -1)
+        [ -n "$destmac" ] && break
+        sleep 0.5
+        _fd_udp_probe "$iface" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT" >/dev/null 2>&1
+    done
     if [ -z "$destmac" ]; then
-        echo "floodsd setup: ping succeeded but no ARP entry resolved for $destip on $iface."
+        echo "floodsd setup: probe(s) sent but no ARP entry resolved for $destip on $iface — check routing/cabling before flooding."
         return 1
     fi
 
@@ -484,8 +529,10 @@ _floodsd_kernel() {
         echo "queue_map_max $i" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
         echo "dst $destip"      | sudo tee "/proc/net/pktgen/$dev" >/dev/null
         echo "dst_mac $destmac" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "udp_dst_min 9000" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "udp_dst_max 9000" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "udp_src_min $FLOOD_SPORT" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "udp_src_max $FLOOD_SPORT" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "udp_dst_min $FLOOD_DPORT" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        echo "udp_dst_max $FLOOD_DPORT" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
     done
     _fd_kernel_set_delay "$iface" "$ncores" "$rate"
 
@@ -726,7 +773,8 @@ _floodsd_dpdk() {
 set 0 dst mac $destmac
 set 0 dst ip $destip
 set 0 proto udp
-set 0 dport 9000
+set 0 dport $FLOOD_DPORT
+set 0 sport $FLOOD_SPORT
 set 0 size 64
 disable 0 vlan
 set 0 src ip ${ifip:-0.0.0.0}
