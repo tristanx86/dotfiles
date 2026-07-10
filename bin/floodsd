@@ -713,6 +713,23 @@ _fd_kernel_cleanup_all() {
     return 1
 }
 
+# _fd_kernel_write <file> <cmd>: writes one pktgen command, checking the
+# result instead of firing-and-forgetting it. pktgen proc writes fail in
+# more ways than you'd expect (permission issues, or kernel-internal error
+# codes like ENOTSUPP=524 leaking through untranslated as "tee: ... Unknown
+# error 524" — classically from queue_map_min/max exceeding what the
+# NIC/bond actually supports) — and without a check, one bad write silently
+# cascades through the rest of that device's commands, then repeats
+# identically for every remaining core. Names the exact command and file
+# that failed instead.
+_fd_kernel_write() {
+    local file=$1 cmd=$2
+    if ! echo "$cmd" | sudo tee "$file" >/dev/null; then
+        echo "floodsd kernel: '$cmd' -> $file failed." >&2
+        return 1
+    fi
+}
+
 # floodsd kernel: in-kernel pktgen flood, driven by an interactive prompt
 # (loosely mirroring pktgen-dpdk's own interactive CLI). pktgen's kernel
 # threads (kpktgend_N) are pinned 1:1 to CPU N, so "core selection" here just
@@ -769,14 +786,13 @@ _floodsd_kernel() {
     # target) can leave stale devices attached that 'start' would fire too.
     _fd_kernel_cleanup_all
 
-    local i core dev thread
+    local i core dev thread cmd
     for ((i = 0; i < ncores; i++)); do
         core=$((hi - i))
         thread="kpktgend_${core}"
         dev="${iface}@${i}"
 
-        if ! echo "add_device $dev" | sudo tee "/proc/net/pktgen/$thread" >/dev/null; then
-            echo "floodsd kernel: couldn't write to /proc/net/pktgen/$thread — aborting instead of repeating this across every core."
+        if ! _fd_kernel_write "/proc/net/pktgen/$thread" "add_device $dev"; then
             echo "  If this is 'Permission denied' despite running as root, it's very likely SELinux (common on hardened RHEL-family boxes):"
             echo "    getenforce                                 # check if it's Enforcing"
             echo "    sudo ausearch -m avc -ts recent | grep -i pktgen   # see the actual denial"
@@ -784,17 +800,22 @@ _floodsd_kernel() {
             return 1
         fi
 
-        echo "count 0"          | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "clone_skb 10000"  | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "pkt_size 64"      | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "queue_map_min $i" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "queue_map_max $i" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "dst $destip"      | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "dst_mac $destmac" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "udp_src_min $FLOOD_SPORT" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "udp_src_max $FLOOD_SPORT" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "udp_dst_min $FLOOD_DPORT" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "udp_dst_max $FLOOD_DPORT" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
+        for cmd in "count 0" "clone_skb 10000" "pkt_size 64" \
+                   "queue_map_min $i" "queue_map_max $i" \
+                   "dst $destip" "dst_mac $destmac" \
+                   "udp_src_min $FLOOD_SPORT" "udp_src_max $FLOOD_SPORT" \
+                   "udp_dst_min $FLOOD_DPORT" "udp_dst_max $FLOOD_DPORT"; do
+            if ! _fd_kernel_write "/proc/net/pktgen/$dev" "$cmd"; then
+                case "$cmd" in
+                    queue_map_*)
+                        echo "  '$cmd' failing often means $iface (or its bond) doesn't have that many TX queues."
+                        echo "  Check: ethtool -l $iface   (or: ls /sys/class/net/$iface/queues/tx-* | wc -l)"
+                        echo "  and try fewer TX cores/threads than it reports."
+                        ;;
+                esac
+                return 1
+            fi
+        done
     done
     _fd_kernel_set_delay "$iface" "$ncores" "$rate"
 
