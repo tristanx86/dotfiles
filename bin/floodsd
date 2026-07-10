@@ -19,10 +19,17 @@
 # enter the destination IP, then floodsd pings it and reads the resolved MAC
 # out of the neighbor table — which doubles as a reachability check before
 # you start flooding. Enter keeps the last value at every subsequent prompt.
+#
+# `floodsd kernel` drops you into an interactive prompt (start / start
+# <mpps|max> / stop / quit) rather than a one-shot run — see its own header
+# comment below for the command set.
 
 set -uo pipefail
 
-FLOODSD_STATE_FILE="$HOME/.config/floodsd/state"
+FLOODSD_STATE_DIR="$HOME/.config/floodsd"
+FLOODSD_STATE_FILE="$FLOODSD_STATE_DIR/state"
+FLOODSD_VFIO_STATE="$FLOODSD_STATE_DIR/vfio-state"
+FLOODSD_DPDK_CMDS="$FLOODSD_STATE_DIR/dpdk.pkt"
 _floodsd_get() { grep "^$1=" "$FLOODSD_STATE_FILE" 2>/dev/null | cut -d= -f2-; }
 _floodsd_set() {
     local key=$1 val=$2
@@ -162,6 +169,7 @@ _fd_vfio_bind() {
             echo "$pci" | sudo tee "/sys/bus/pci/devices/$pci/driver/unbind" >/dev/null
         echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null
     fi
+    mkdir -p "$(dirname "$state")"
     printf 'pci=%s\ndrv=%s\nif=%s\nip=%s\npeer=%s\n' "$pci" "$curdrv" "$iface" "$ip" "$peer" > "$state"
     echo "  To rebind the kernel driver + restore $iface later:  $tool restore"
 }
@@ -280,11 +288,150 @@ _floodsd_setup() {
     echo "Target confirmed: $destip ($destmac) reachable via $iface."
 }
 
-# floodsd kernel: in-kernel pktgen flood at a target Mpps. pktgen's kernel
+# _fd_ensure_pktgen_module: modprobe the in-kernel pktgen module, installing
+# it first if missing. On RHEL-family distros (RHEL/Rocky/Alma 9) pktgen.ko
+# ships in "kernel-modules-extra" rather than the base kernel package, so
+# minimal installs commonly don't have it; Debian/Ubuntu ship it in
+# "linux-modules-extra-$(uname -r)", also sometimes absent on minimal
+# cloud images. Package name is matched to the running kernel version so it
+# isn't left on a mismatched/newer kernel package after an update.
+_fd_ensure_pktgen_module() {
+    sudo modprobe pktgen 2>/dev/null && return 0
+
+    echo "floodsd kernel: 'pktgen' kernel module not found — installing for kernel $(uname -r)..."
+    local krel; krel=$(uname -r)
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -y
+        sudo apt-get install -y "linux-modules-extra-${krel}" \
+            || { echo "floodsd kernel: couldn't install linux-modules-extra-${krel} — install it manually."; return 1; }
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y "kernel-modules-extra-${krel}" \
+            || { echo "floodsd kernel: couldn't install kernel-modules-extra-${krel} — install it manually."; return 1; }
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum install -y "kernel-modules-extra-${krel}" \
+            || { echo "floodsd kernel: couldn't install kernel-modules-extra-${krel} — install it manually."; return 1; }
+    else
+        echo "floodsd kernel: no supported package manager found (apt-get/dnf/yum) — install the pktgen kernel module manually."
+        return 1
+    fi
+
+    sudo modprobe pktgen \
+        || { echo "floodsd kernel: installed the package but 'modprobe pktgen' still fails — check 'uname -r' matches the installed module package."; return 1; }
+}
+
+# _fd_kernel_valid_rate <rate>: true if <rate> is "max" (any case) or a
+# non-negative number.
+_fd_kernel_valid_rate() {
+    case "$1" in
+        [Mm][Aa][Xx]) return 0 ;;
+        *) [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] ;;
+    esac
+}
+
+# _fd_kernel_norm_rate <rate>: canonicalizes "max"/"Max"/etc to "MAX".
+_fd_kernel_norm_rate() {
+    case "$1" in
+        [Mm][Aa][Xx]) echo MAX ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# _fd_kernel_set_delay <iface> <ncores> <rate>: computes the per-thread
+# nanosecond delay for <rate> Mpps split evenly across <ncores> threads
+# (MAX = 0 delay, i.e. no throttling) and writes it to each configured
+# device. Safe to call on a running flood or a stopped one — pktgen doesn't
+# document live reconfiguration of an active device, so callers that want a
+# rate change to apply mid-flood are expected to stop/restart around this
+# (see the 'start <rate>' command in _floodsd_kernel).
+_fd_kernel_set_delay() {
+    local iface=$1 ncores=$2 rate=$3
+    local delay_ns i
+    if [ "$rate" = MAX ]; then
+        delay_ns=0
+    else
+        delay_ns=$(awk -v mpps="$rate" -v cores="$ncores" 'BEGIN {
+            total_pps = mpps * 1000000;
+            pps_per_core = total_pps / cores;
+            printf "%d", 1000000000 / pps_per_core
+        }')
+    fi
+    for ((i = 0; i < ncores; i++)); do
+        echo "delay $delay_ns" | sudo tee "/proc/net/pktgen/${iface}@${i}" >/dev/null
+    done
+}
+
+# _fd_kernel_pkt_total <iface> <ncores>: sums "pkts-sofar" across all
+# configured devices — used to compute the live Mpps counter.
+_fd_kernel_pkt_total() {
+    local iface=$1 ncores=$2 i val total=0
+    for ((i = 0; i < ncores; i++)); do
+        val=$(grep "pkts-sofar" "/proc/net/pktgen/${iface}@${i}" 2>/dev/null | awk '{print $2}')
+        total=$((total + val))
+    done
+    echo "$total"
+}
+
+# _fd_kernel_thread_has_devices <core>: true if kpktgend_<core> still lists
+# a device on its "Running:" or "Stopped:" line (pktgen's proc format —
+# both list attached devices regardless of send state).
+_fd_kernel_thread_has_devices() {
+    local f="/proc/net/pktgen/kpktgend_${1}"
+    [ -e "$f" ] || return 1
+    awk -F': ' '/^Running:|^Stopped:/ { if (length($2) > 0) found=1 } END { exit !found }' "$f"
+}
+
+# _fd_kernel_cleanup_all: stop sending and rem_device_all across *every*
+# kpktgend_N thread (0..nproc-1) — not just whatever core range the current
+# session picked. This is the fix for a real bug: pgctrl start/stop is
+# global to the whole pktgen subsystem, but device (re)configuration used to
+# only touch the top-N cores requested *this* run. Shrinking the core count
+# between 'floodsd kernel' sessions (or re-pointing at a new target via
+# 'floodsd setup' in between) left lower-numbered cores' devices attached
+# with their old dst/delay — and 'start' would fire them too, silently
+# flooding a stale target alongside the intended one. Verifies the sweep
+# actually took (retrying once) rather than assuming rem_device_all worked;
+# returns 1 (with a warning already printed) if devices are still stuck.
+_fd_kernel_cleanup_all() {
+    echo "stop" | sudo tee /proc/net/pktgen/pgctrl >/dev/null 2>&1
+
+    local hi=$(( $(nproc) - 1 )) n attempt leftover
+    for attempt in 1 2; do
+        for ((n = 0; n <= hi; n++)); do
+            [ -e "/proc/net/pktgen/kpktgend_${n}" ] || continue
+            echo "rem_device_all" | sudo tee "/proc/net/pktgen/kpktgend_${n}" >/dev/null 2>&1
+        done
+        leftover=0
+        for ((n = 0; n <= hi; n++)); do
+            _fd_kernel_thread_has_devices "$n" && leftover=$((leftover + 1))
+        done
+        [ "$leftover" -eq 0 ] && return 0
+        [ "$attempt" -eq 1 ] && echo "floodsd kernel: $leftover thread(s) still show attached devices after cleanup — retrying..."
+    done
+
+    echo "floodsd kernel: WARNING — $leftover pktgen thread(s) still have devices attached after two cleanup attempts."
+    echo "  Check manually: grep -l 'Stopped: \\|Running: ' /proc/net/pktgen/kpktgend_* 2>/dev/null | xargs -r grep -H 'Stopped:\\|Running:'"
+    return 1
+}
+
+# floodsd kernel: in-kernel pktgen flood, driven by an interactive prompt
+# (loosely mirroring pktgen-dpdk's own interactive CLI). pktgen's kernel
 # threads (kpktgend_N) are pinned 1:1 to CPU N, so "core selection" here just
 # means which kpktgend_N thread a device gets loaded into — cores are picked
 # top-down (highest first) to match pktfd's convention and avoid low cores
-# other tools tend to pin to.
+# other tools tend to pin to. Core count is fixed for the session (asked
+# once, up front); quit and re-run to change it. Commands at the prompt:
+#   start            start (or, if already running, no-op) at the current rate
+#   start <mpps|max> set the rate and (re)start — if already running, this
+#                    stops, rewrites the per-thread delay, and restarts
+#                    (a brief sub-second gap; pktgen doesn't document live
+#                    reconfiguration of an actively-sending device)
+#   stop             halt sending; devices stay configured, 'start' resumes
+#   quit / exit      full cleanup (stop + rem_device_all everywhere,
+#                    verified — see _fd_kernel_cleanup_all), then leave
+# Ctrl-C and EOF (Ctrl-D) both behave like 'quit' rather than leaving an
+# orphaned flood with no controlling shell. There's deliberately no
+# 'floodsd restore' equivalent for the kernel engine — quit's own cleanup
+# is what's supposed to guarantee nothing is left running/attached.
 _floodsd_kernel() {
     local iface destip destmac
     iface=$(_floodsd_get if); destip=$(_floodsd_get destip); destmac=$(_floodsd_get destmac)
@@ -314,27 +461,13 @@ _floodsd_kernel() {
         return 1
     fi
 
-    local currate rate
-    currate=$(_floodsd_get kernrate); currate=${currate:-MAX}
-    read -rp "Target Mpps (or MAX)? [${currate}] " rate
-    rate=${rate:-$currate}
-    _floodsd_set kernrate "$rate"
+    local rate; rate=$(_floodsd_get kernrate); rate=${rate:-MAX}
 
-    local delay_ns
-    if [ "$rate" = MAX ] || [ "$rate" = max ]; then
-        delay_ns=0
-        echo "Configuring $ncores threads (cores $lo-$hi) for MAXIMUM speed..."
-    else
-        delay_ns=$(awk -v mpps="$rate" -v cores="$ncores" 'BEGIN {
-            total_pps = mpps * 1000000;
-            pps_per_core = total_pps / cores;
-            printf "%d", 1000000000 / pps_per_core
-        }')
-        echo "Configuring $ncores threads (cores $lo-$hi) for target $rate Mpps (delay ${delay_ns}ns/core)..."
-    fi
-
-    sudo modprobe pktgen
-    echo "stop" | sudo tee /proc/net/pktgen/pgctrl >/dev/null 2>&1
+    _fd_ensure_pktgen_module || return 1
+    # Clean slate across ALL threads, not just the ones this session picked —
+    # otherwise a previous run with a larger core count (or a different
+    # target) can leave stale devices attached that 'start' would fire too.
+    _fd_kernel_cleanup_all
 
     local i core dev thread
     for ((i = 0; i < ncores; i++)); do
@@ -342,13 +475,11 @@ _floodsd_kernel() {
         thread="kpktgend_${core}"
         dev="${iface}@${i}"
 
-        echo "rem_device_all" | sudo tee "/proc/net/pktgen/$thread" >/dev/null
         echo "add_device $dev" | sudo tee "/proc/net/pktgen/$thread" >/dev/null
 
         echo "count 0"          | sudo tee "/proc/net/pktgen/$dev" >/dev/null
         echo "clone_skb 10000"  | sudo tee "/proc/net/pktgen/$dev" >/dev/null
         echo "pkt_size 64"      | sudo tee "/proc/net/pktgen/$dev" >/dev/null
-        echo "delay $delay_ns"  | sudo tee "/proc/net/pktgen/$dev" >/dev/null
         echo "queue_map_min $i" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
         echo "queue_map_max $i" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
         echo "dst $destip"      | sudo tee "/proc/net/pktgen/$dev" >/dev/null
@@ -356,55 +487,113 @@ _floodsd_kernel() {
         echo "udp_dst_min 9000" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
         echo "udp_dst_max 9000" | sudo tee "/proc/net/pktgen/$dev" >/dev/null
     done
+    _fd_kernel_set_delay "$iface" "$ncores" "$rate"
 
-    # Writing "start" blocks until "stop" is written, so background it and
-    # run the Mpps monitor in the foreground.
-    echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null &
+    echo "Configured $ncores TX cores (cores $lo-$hi) -> $destip ($destmac) via $iface."
+    echo "Commands: start | start <mpps|max> | stop | quit"
 
-    echo "Flooding $destip ($destmac) via $iface — cores $lo-$hi, target ${rate} Mpps."
-    echo "Ctrl-C stops watching (traffic keeps flowing — run 'floodsd stop' to actually stop it)."
-    echo "------------------------------------------------------"
+    local running=0 p1=0 p2 diff mpps line rc
+    trap 'echo; _fd_kernel_cleanup_all && echo "Stopped — all pktgen devices cleared."; echo "Exiting."; trap - INT; return 0' INT
 
-    local p1 p2 diff mpps val
     while true; do
-        p1=0
-        for ((i = 0; i < ncores; i++)); do
-            val=$(grep "pkts-sofar" "/proc/net/pktgen/${iface}@${i}" 2>/dev/null | awk '{print $2}')
-            p1=$((p1 + val))
-        done
+        local prompt="floodsd kernel"
+        [ "$running" = 1 ] && prompt="floodsd kernel [running, ${rate} Mpps]"
 
-        sleep 1
-
-        p2=0
-        for ((i = 0; i < ncores; i++)); do
-            val=$(grep "pkts-sofar" "/proc/net/pktgen/${iface}@${i}" 2>/dev/null | awk '{print $2}')
-            p2=$((p2 + val))
-        done
-
-        diff=$((p2 - p1))
-        mpps=$(awk -v diff="$diff" 'BEGIN { printf "%.2f", diff / 1000000 }')
-        echo "Current TX speed: $mpps Mpps"
+        if IFS= read -r -t 1 -p "${prompt}> " line; then
+            case "$line" in
+                start)
+                    if [ "$running" = 1 ]; then
+                        echo "Already running at ${rate} Mpps."
+                    else
+                        echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null &
+                        running=1
+                        p1=$(_fd_kernel_pkt_total "$iface" "$ncores")
+                        echo "Started at ${rate} Mpps."
+                    fi
+                    ;;
+                start\ *)
+                    local newrate; newrate=$(echo "${line#start }" | xargs)
+                    if ! _fd_kernel_valid_rate "$newrate"; then
+                        echo "Invalid rate '$newrate' — use a number or MAX."
+                    else
+                        rate=$(_fd_kernel_norm_rate "$newrate")
+                        _floodsd_set kernrate "$rate"
+                        if [ "$running" = 1 ]; then
+                            echo "stop" | sudo tee /proc/net/pktgen/pgctrl >/dev/null 2>&1
+                        fi
+                        _fd_kernel_set_delay "$iface" "$ncores" "$rate"
+                        echo "start" | sudo tee /proc/net/pktgen/pgctrl >/dev/null &
+                        running=1
+                        p1=$(_fd_kernel_pkt_total "$iface" "$ncores")
+                        echo "Rate set to ${rate} Mpps."
+                    fi
+                    ;;
+                stop)
+                    if [ "$running" = 1 ]; then
+                        echo "stop" | sudo tee /proc/net/pktgen/pgctrl >/dev/null 2>&1
+                        running=0
+                        echo "Stopped (devices stay configured — 'start' resumes)."
+                    else
+                        echo "Already stopped."
+                    fi
+                    ;;
+                quit | exit)
+                    _fd_kernel_cleanup_all && echo "Stopped — all pktgen devices cleared."
+                    trap - INT
+                    return 0
+                    ;;
+                "") ;;
+                *)
+                    echo "Unknown command '$line'. Use: start | start <mpps|max> | stop | quit"
+                    ;;
+            esac
+        else
+            rc=$?
+            if [ "$rc" -gt 128 ]; then
+                if [ "$running" = 1 ]; then
+                    p2=$(_fd_kernel_pkt_total "$iface" "$ncores")
+                    diff=$((p2 - p1))
+                    mpps=$(awk -v diff="$diff" 'BEGIN { printf "%.2f", diff / 1000000 }')
+                    echo "  [$mpps Mpps]"
+                    p1=$p2
+                fi
+            else
+                # EOF (Ctrl-D / stdin closed) — same as quit.
+                _fd_kernel_cleanup_all && echo "Stopped — all pktgen devices cleared."
+                trap - INT
+                return 0
+            fi
+        fi
     done
 }
 
-# floodsd stop: halt the in-kernel pktgen flood (devices stay configured).
+# floodsd stop: halt the in-kernel pktgen flood from a separate shell —
+# devices stay configured. Exists as a kill switch independent of the
+# interactive prompt above: kernel pktgen state outlives the shell that
+# configured it, so if that session dies (SSH drop, closed terminal) while
+# a flood is running, this is how you stop it.
 _floodsd_stop() {
     echo "stop" | sudo tee /proc/net/pktgen/pgctrl >/dev/null 2>&1
     echo "Kernel pktgen stopped."
 }
 
-# _floodsd_ensure_dpdk: install DPDK + build Pktgen-DPDK from source if the
-# 'pktgen' binary isn't on PATH. DPDK's dev packages are in standard distro
-# repos, but Pktgen-DPDK itself normally isn't, so it's built from source
-# into ~/.local/src (no root needed for the clone/build, only the final
-# 'ninja install').
+# _floodsd_ensure_dpdk: install DPDK + build Pktgen-DPDK from source if it
+# hasn't been built yet. DPDK's dev packages are in standard distro repos
+# (no user-dir equivalent without rebuilding DPDK itself from source, so
+# this is the one system-wide install floodsd makes) but Pktgen-DPDK itself
+# normally isn't packaged, so it's built from source into ~/.local/src and
+# installed into ~/.local (bin + lib) — never /usr/local, since this box
+# usually isn't yours.
 PKTGEN_SRC_DIR="$HOME/.local/src/pktgen-dpdk"
+PKTGEN_PREFIX="$HOME/.local"
+PKTGEN_BIN="$PKTGEN_PREFIX/bin/pktgen"
 _floodsd_ensure_dpdk() {
-    command -v pktgen >/dev/null 2>&1 && return 0
+    [ -x "$PKTGEN_BIN" ] && return 0
 
-    echo "floodsd dpdk: 'pktgen' not found on PATH."
-    echo "  This installs DPDK's dev packages via the system package manager,"
-    echo "  then clones + builds Pktgen-DPDK from source into $PKTGEN_SRC_DIR."
+    echo "floodsd dpdk: '$PKTGEN_BIN' not found."
+    echo "  This installs DPDK's dev packages via the system package manager (the"
+    echo "  one system-wide step — no user-dir equivalent), then clones + builds"
+    echo "  Pktgen-DPDK from source into $PKTGEN_SRC_DIR, installed to $PKTGEN_PREFIX."
     local ans
     read -rp "Proceed? [y/N] " ans
     case "$ans" in
@@ -428,12 +617,25 @@ _floodsd_ensure_dpdk() {
     case "$pkgmgr" in
         apt)
             sudo apt-get update -y
-            sudo apt-get install -y dpdk dpdk-dev meson ninja-build pkg-config libnuma-dev git \
+            sudo apt-get install -y dpdk dpdk-dev meson ninja-build pkg-config libnuma-dev git gcc make \
                 || { echo "floodsd dpdk: package install failed — install DPDK manually and re-run."; return 1; }
             ;;
         dnf|yum)
-            sudo "$pkgmgr" install -y dpdk dpdk-devel meson ninja-build pkgconf-pkg-config numactl-devel git \
-                || { echo "floodsd dpdk: package install failed — install DPDK manually and re-run."; return 1; }
+            # Minimal RHEL-family images (Rocky/Alma/RHEL 9) often lack a C
+            # toolchain entirely — gcc/make aren't pulled in by dpdk-devel.
+            local dpdk_pkgs=(dpdk dpdk-devel meson ninja-build pkgconf-pkg-config numactl-devel git gcc make)
+            if ! sudo "$pkgmgr" install -y "${dpdk_pkgs[@]}" 2>/dev/null; then
+                # dpdk-devel is sometimes unresolvable on a minimal RHEL-family 9
+                # install until EPEL + CRB (CodeReady Builder, formerly
+                # PowerTools) are enabled. Try enabling both, then retry once
+                # before giving up.
+                echo "floodsd dpdk: initial install failed — trying with EPEL + CRB enabled (common on minimal RHEL-family images)..."
+                sudo "$pkgmgr" install -y epel-release dnf-plugins-core 2>/dev/null
+                sudo dnf config-manager --set-enabled crb 2>/dev/null \
+                    || sudo dnf config-manager --set-enabled powertools 2>/dev/null
+                sudo "$pkgmgr" install -y "${dpdk_pkgs[@]}" \
+                    || { echo "floodsd dpdk: package install failed even with EPEL/CRB enabled — install DPDK manually and re-run."; return 1; }
+            fi
             ;;
     esac
 
@@ -446,21 +648,20 @@ _floodsd_ensure_dpdk() {
         git clone https://github.com/pktgen/Pktgen-DPDK.git "$PKTGEN_SRC_DIR" || return 1
     fi
 
-    echo "Building Pktgen-DPDK (meson + ninja)..."
+    echo "Building Pktgen-DPDK (meson + ninja), installing to $PKTGEN_PREFIX..."
     (
         cd "$PKTGEN_SRC_DIR" || exit 1
         rm -rf build
-        meson setup build || exit 1
+        meson setup build --prefix="$PKTGEN_PREFIX" --libdir=lib || exit 1
         ninja -C build || exit 1
-        sudo ninja -C build install || exit 1
+        ninja -C build install || exit 1
     ) || { echo "floodsd dpdk: build failed — see output above."; return 1; }
-    sudo ldconfig
 
-    if ! command -v pktgen >/dev/null 2>&1; then
-        echo "floodsd dpdk: built successfully but 'pktgen' still not on PATH — check /usr/local/bin is in PATH."
+    if [ ! -x "$PKTGEN_BIN" ]; then
+        echo "floodsd dpdk: build reported success but $PKTGEN_BIN wasn't produced."
         return 1
     fi
-    echo "pktgen installed: $(command -v pktgen)"
+    echo "pktgen installed: $PKTGEN_BIN"
 }
 
 # floodsd dpdk: bind the flood NIC to vfio-pci (skipped for Mellanox) and
@@ -517,9 +718,10 @@ _floodsd_dpdk() {
 
     _fd_reserve_hugepages "$ntx"
 
-    [ "$mellanox" != 1 ] && _fd_vfio_bind floodsd "$iface" "$pci" "$curdrv" /tmp/floodsd-bound "" "$ifip"
+    [ "$mellanox" != 1 ] && _fd_vfio_bind floodsd "$iface" "$pci" "$curdrv" "$FLOODSD_VFIO_STATE" "" "$ifip"
 
-    local cmds=/tmp/floodsd-dpdk.pkt
+    local cmds="$FLOODSD_DPDK_CMDS"
+    mkdir -p "$(dirname "$cmds")"
     cat > "$cmds" <<EOF
 set 0 dst mac $destmac
 set 0 dst ip $destip
@@ -532,12 +734,16 @@ EOF
 
     echo "Launching pktgen on $iface ($pci) -> $destip ($destmac), lcores $lcores (main $main)..."
     echo "(pktgen drops you at its interactive prompt — run 'start 0' yourself when ready.)"
-    sudo pktgen -l "$lcores" -n 4 -a "$pci" --main-lcore "$main" -- -m "$map" -f "$cmds"
+    # Absolute path (not just "pktgen"): sudo's secure_path typically strips
+    # ~/.local/bin from PATH. LD_LIBRARY_PATH is passed explicitly through
+    # env since libpktgen.so lives in ~/.local/lib, outside the system
+    # linker cache (sudo would otherwise reset the environment).
+    sudo env LD_LIBRARY_PATH="$PKTGEN_PREFIX/lib" "$PKTGEN_BIN" -l "$lcores" -n 4 -a "$pci" --main-lcore "$main" -- -m "$map" -f "$cmds"
 }
 
 # floodsd restore: undo a vfio-pci bind from `floodsd dpdk` — rebind the NIC
 # to its kernel driver and rename the reborn netdev back to its original name.
-_floodsd_restore() { _fd_vfio_restore "floodsd restore" /tmp/floodsd-bound; }
+_floodsd_restore() { _fd_vfio_restore "floodsd restore" "$FLOODSD_VFIO_STATE"; }
 
 floodsd() {
     case "${1:-}" in
