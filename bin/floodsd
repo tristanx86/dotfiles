@@ -16,13 +16,35 @@
 #   floodsd dpdk    DPDK pktgen (userspace, needs a NIC bound to vfio-pci/mlx5)
 #   floodsd kernel  in-kernel pktgen module (no DPDK/hugepages needed)
 #
+# Bonded NICs: `floodsd kernel`/`setup` can target a bond master directly —
+# pktgen rides it like any other kernel netdevice. `floodsd dpdk` needs a
+# real PCI device, so pick one of the bond's slaves instead (see
+# _fd_pick_iface's bond labeling); if that slave is still enslaved,
+# `floodsd dpdk` offers to pull it out of the bond first and `floodsd
+# restore` puts it back (see _fd_bond_detach/_fd_bond_reattach).
+#
 # `floodsd setup` resolves and saves the target once: pick the sending NIC,
 # enter the destination IP, then floodsd sends it a UDP probe (source port
 # pinned to $FLOOD_SPORT — ICMP ping has no source port to pin, so it's
 # dropped outbound by this box's egress firewall even though inbound ICMP
 # works) and reads the resolved MAC out of the neighbor table, which doubles
 # as a reachability check before you start flooding. Enter keeps the last
-# value at every subsequent prompt.
+# value at every subsequent prompt. Works whether the target is on-link or a
+# routed hop away (see _fd_nexthop_ip) — when routed, the router's MAC gets
+# resolved and used at L2 while the target's real IP still goes in the IP
+# header, exactly like normal routing.
+#
+# `floodsd setup-srcport` overrides the default source port (8424) if this
+# box's egress firewall pins a different one — run it before `floodsd setup`
+# on a box where the default doesn't get probes out.
+#
+# `floodsd diagnose` is a read-only, opt-in health check (link state, route/
+# next-hop, rp_filter, python3, a best-effort firewall-rule grep) — nothing
+# else in floodsd calls it, so it's only there when you go looking for it.
+# When `floodsd setup` itself fails to resolve a MAC, it also auto-runs a
+# short tcpdump-based check (see _fd_diagnose_probe) to tell a local firewall
+# drop apart from an upstream block — but only on that failure path, so a
+# normal box on a normal network never sees any of this.
 #
 # `floodsd kernel` drops you into an interactive prompt (start / start
 # <mpps|max> / stop / quit) rather than a one-shot run — see its own header
@@ -31,11 +53,12 @@
 set -uo pipefail
 
 FLOOD_DPORT=9000  # target port on the validator under test
-FLOOD_SPORT=8424  # source port everything egresses from — this box's firewall only allows outbound traffic sourced from this port
+FLOOD_SPORT=8424  # default source port everything egresses from — override per-box with `floodsd setup-srcport` if this box's egress firewall pins a different port
 
 FLOODSD_STATE_DIR="$HOME/.config/floodsd"
 FLOODSD_STATE_FILE="$FLOODSD_STATE_DIR/state"
 FLOODSD_VFIO_STATE="$FLOODSD_STATE_DIR/vfio-state"
+FLOODSD_BOND_STATE="$FLOODSD_STATE_DIR/bond-state"
 FLOODSD_DPDK_CMDS="$FLOODSD_STATE_DIR/dpdk.pkt"
 _floodsd_get() { grep "^$1=" "$FLOODSD_STATE_FILE" 2>/dev/null | cut -d= -f2-; }
 _floodsd_set() {
@@ -46,21 +69,51 @@ _floodsd_set() {
     mv "$tmp" "$FLOODSD_STATE_FILE"
 }
 
+# The egress-allowed source port varies by box (whatever its firewall pins),
+# so a saved override (see `floodsd setup-srcport`) always beats the
+# FLOOD_SPORT default above.
+_fd_saved_sport=$(_floodsd_get sport)
+[ -n "$_fd_saved_sport" ] && FLOOD_SPORT=$_fd_saved_sport
+
 # ── Shared DPDK/NIC helpers ───────────────────────────
+
+# _fd_bond_tag <iface>: prints a bracketed annotation for _fd_pick_iface —
+# "[bond, mode <N>, slaves: a,b]" if <iface> is a bonding master, "[bonded
+# slave of <bond>]" if it's enslaved, or "" otherwise.
+_fd_bond_tag() {
+    local iface=$1 mode slaves master
+    if [ -d "/sys/class/net/$iface/bonding" ]; then
+        mode=$(awk '{print $1}' "/sys/class/net/$iface/bonding/mode" 2>/dev/null)
+        slaves=$(cat "/sys/class/net/$iface/bonding/slaves" 2>/dev/null | tr ' ' ',')
+        echo "[bond${mode:+, mode $mode}${slaves:+, slaves: $slaves}]"
+        return
+    fi
+    master=$(readlink -f "/sys/class/net/$iface/master" 2>/dev/null)
+    [ -n "$master" ] && echo "[bonded slave of ${master##*/}]"
+}
 
 # _fd_pick_iface <prefix> <label> [current]: list network interfaces and
 # prompt for one, printing the choice to stdout. Enter keeps [current] if given.
+# Bonding masters and their slaves are both listed (see _fd_bond_tag) —
+# `floodsd kernel`/`setup` want the bond master (kernel pktgen rides a bond
+# transparently); `floodsd dpdk` needs a real physical NIC, so pick a slave
+# for that (see the bond handling in _floodsd_dpdk).
 _fd_pick_iface() {
     local prefix=$1 label=$2 cur=$3
-    local ifaces=() i idx=1 drv
+    local ifaces=() i idx=1 drv bondtag state statetag
     echo "Available interfaces:" >&2
     for i in /sys/class/net/*; do
         [ -e "$i" ] || continue
         i=${i##*/}
         [ "$i" = lo ] && continue
         drv=$(basename "$(readlink -f "/sys/class/net/$i/device/driver" 2>/dev/null)" 2>/dev/null)
+        bondtag=$(_fd_bond_tag "$i")
+        # Only flag non-"up" state — healthy interfaces stay quiet, so this
+        # doesn't clutter the picker for the common case.
+        state=$(cat "/sys/class/net/$i/operstate" 2>/dev/null)
+        statetag=""; [ -n "$state" ] && [ "$state" != up ] && statetag="($state) "
         ifaces+=("$i")
-        printf "  %d) %-20s %s\n" "$idx" "$i" "${drv:+driver: $drv}" >&2
+        printf "  %d) %-20s %s\n" "$idx" "$i" "${statetag}${drv:+driver: $drv }${bondtag}" >&2
         idx=$((idx + 1))
     done
     if [ "${#ifaces[@]}" -eq 0 ]; then
@@ -248,6 +301,65 @@ _fd_vfio_restore() {
     [ -n "$peer" ] && echo "  $peer link restored."
 }
 
+# _fd_bond_detach <iface>: if <iface> is currently an active bonding slave,
+# offers to remove it from its bond before DPDK takes it over — DPDK's
+# pktgen talks to the NIC directly (or, for vfio-pci NICs, needs the kernel
+# driver detached entirely), and leaving it enslaved means the bonding
+# driver is still trying to use the same NIC for kernel traffic underneath
+# DPDK, corrupting both. Records <iface>/<bond> in $FLOODSD_BOND_STATE
+# (independent of $FLOODSD_VFIO_STATE, since Mellanox NICs skip vfio
+# binding entirely but still need to be re-enslaved on restore) so
+# `floodsd restore` can re-add it afterward.
+_fd_bond_detach() {
+    local iface=$1 master
+    master=$(readlink -f "/sys/class/net/$iface/master" 2>/dev/null)
+    [ -z "$master" ] && return 0
+    master=${master##*/}
+
+    echo "'$iface' is currently enslaved to bond '$master'."
+    local ans
+    read -rp "Remove it from the bond before using it for DPDK? [Y/n]: " ans
+    case "${ans:-Y}" in
+        n|N|no|No)
+            echo "floodsd dpdk: leaving '$iface' enslaved to '$master' — expect vfio-pci bind failures or a destabilized bond."
+            return 0
+            ;;
+    esac
+
+    echo "Removing $iface from bond $master..."
+    echo "-$iface" | sudo tee "/sys/class/net/$master/bonding/slaves" >/dev/null
+    mkdir -p "$(dirname "$FLOODSD_BOND_STATE")"
+    printf 'if=%s\nbond=%s\n' "$iface" "$master" > "$FLOODSD_BOND_STATE"
+    echo "  Recorded — 'floodsd restore' will re-add it to '$master' afterward."
+}
+
+# _fd_bond_reattach: undoes _fd_bond_detach — re-adds the recorded interface
+# to its bond. Run after _fd_vfio_restore (if that ran at all — Mellanox
+# NICs never get vfio-bound, so this is often the only restore step needed).
+_fd_bond_reattach() {
+    [ -f "$FLOODSD_BOND_STATE" ] || return 1
+    local iface bond k v
+    while IFS='=' read -r k v; do
+        case "$k" in if) iface=$v ;; bond) bond=$v ;; esac
+    done < "$FLOODSD_BOND_STATE"
+    if [ -z "$iface" ] || [ -z "$bond" ]; then
+        echo "floodsd restore: bond-state file is malformed; remove $FLOODSD_BOND_STATE and re-enslave manually."
+        rm -f "$FLOODSD_BOND_STATE"
+        return 1
+    fi
+    if ! ip link show "$bond" >/dev/null 2>&1; then
+        echo "floodsd restore: bond '$bond' no longer exists — skipping re-enslave of '$iface'."
+        rm -f "$FLOODSD_BOND_STATE"
+        return 1
+    fi
+
+    echo "Re-adding $iface to bond $bond..."
+    sudo ip link set "$iface" down
+    echo "+$iface" | sudo tee "/sys/class/net/$bond/bonding/slaves" >/dev/null
+    rm -f "$FLOODSD_BOND_STATE"
+    echo "Done — $iface is back in bond $bond."
+}
+
 # ── floodsd ───────────────────────────────────────────
 
 # _fd_udp_probe <iface> <destip> <destport> <srcport>: sends one UDP
@@ -282,11 +394,83 @@ finally:
 PYEOF
 }
 
-# floodsd setup: pick the sending NIC, take a destination IP, then send it a
-# UDP probe (see _fd_udp_probe) and read the resolved MAC out of the
-# neighbor table. The probe doubles as a reachability check — if no ARP
-# entry ever resolves, something's wrong with routing/cabling before you
-# ever get to flooding.
+# _fd_nexthop_ip <iface> <destip>: prints the IP whose MAC actually needs
+# resolving to reach <destip> out <iface> — <destip> itself if it's on-link
+# (same subnet, no router), or the next-hop router's IP if <destip> is a
+# routed hop away. This matters because the kernel only ever ARPs for
+# whichever of those two is the real L2 neighbor: if there's a router in
+# between, `ip neigh show <destip>` can never populate no matter how many
+# probes you send — only the router's IP ever gets a neighbor entry. Packets
+# still carry <destip> as their IP destination; only the resolved MAC (the
+# L2 next hop) differs, exactly as normal routing works.
+_fd_nexthop_ip() {
+    local iface=$1 destip=$2
+    ip route get "$destip" oif "$iface" 2>/dev/null | awk '{
+        for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit }
+        print $1; exit
+    }'
+}
+
+# _fd_diagnose_probe <iface> <destip> <destport> <srcport> <nexthop>: only
+# called after a setup probe has already failed to resolve a MAC — never on
+# the happy path, so a normal box never sees this. Re-sends one probe under
+# a short tcpdump capture (if tcpdump is installed) to tell apart "packet
+# never left the NIC" (this box's own iptables/nftables OUTPUT chain is
+# dropping it — fixable here, e.g. with `floodsd setup-srcport`) from
+# "packet left fine, nothing came back" (blocked further upstream — a router
+# ACL, a cloud security group/NACL, or $nexthop being unreachable — not
+# fixable from this box). Falls back to a manual suggestion if tcpdump isn't
+# available.
+_fd_diagnose_probe() {
+    local iface=$1 destip=$2 destport=$3 srcport=$4 nexthop=$5
+    echo
+    echo "Diagnosing why $nexthop didn't resolve..."
+
+    local state
+    state=$(cat "/sys/class/net/$iface/operstate" 2>/dev/null)
+    [ -n "$state" ] && [ "$state" != up ] && \
+        echo "  '$iface' operstate is '$state', not 'up' — check the cable/link before anything else."
+
+    if ! command -v tcpdump >/dev/null 2>&1; then
+        echo "  tcpdump not found — can't auto-check whether probes leave $iface."
+        echo "  Manually: 'sudo tcpdump -ni $iface udp or arp' in one shell, re-run 'floodsd setup' in another."
+        return
+    fi
+
+    local cap
+    if ! cap=$(mktemp /tmp/floodsd-diag-XXXXXX.pcap); then
+        echo "  couldn't create a temp file for the capture (is /tmp writable?) — skipping the auto tcpdump check."
+        echo "  Manually: 'sudo tcpdump -ni $iface udp or arp' in one shell, re-run 'floodsd setup' in another."
+        return
+    fi
+    sudo timeout 3 tcpdump -ni "$iface" -w "$cap" "udp port $srcport or arp" >/dev/null 2>&1 &
+    local tcpdump_pid=$!
+    sleep 0.3
+    _fd_udp_probe "$iface" "$destip" "$destport" "$srcport" >/dev/null 2>&1
+    wait "$tcpdump_pid" 2>/dev/null
+
+    local seen=0
+    sudo test -s "$cap" && seen=$(sudo tcpdump -nr "$cap" 2>/dev/null | wc -l | tr -d ' ')
+    sudo rm -f "$cap"
+
+    if [ "${seen:-0}" -gt 0 ]; then
+        echo "  Probe DID leave $iface ($seen packet(s) captured) — the block is further upstream:"
+        echo "    a router ACL, cloud security group/NACL, or $nexthop itself being unreachable/down."
+        echo "    This box's own firewall looks fine; check with whoever owns the network path to $destip."
+    else
+        echo "  Probe did NOT leave $iface — this box's own firewall is dropping it before it hits the wire."
+        echo "    Check: sudo iptables -S OUTPUT   /   sudo nft list ruleset"
+        echo "    Look for a rule keyed on src port $srcport, dst port $destport, or destination $destip."
+        echo "    If the allowed source port differs, fix it with: floodsd setup-srcport"
+    fi
+}
+
+# floodsd setup: pick the sending NIC, take a destination IP, resolve the
+# real L2 next hop (see _fd_nexthop_ip — the target itself if on-link, or a
+# router if routed), then send a UDP probe (see _fd_udp_probe) and read the
+# resolved MAC out of the neighbor table. The probe doubles as a
+# reachability check — if no ARP entry ever resolves, something's wrong with
+# routing/cabling before you ever get to flooding.
 _floodsd_setup() {
     local iface
     iface=$(_fd_pick_iface "floodsd" "Sending NIC" "$(_floodsd_get if)") || return 1
@@ -309,7 +493,22 @@ _floodsd_setup() {
     destip=${destip:-$curdestip}
     [ -z "$destip" ] && { echo "floodsd setup: no destination IP given."; return 1; }
 
-    echo "Probing $destip:$FLOOD_DPORT via $iface (UDP, src port $FLOOD_SPORT) to resolve its MAC..."
+    local nexthop
+    nexthop=$(_fd_nexthop_ip "$iface" "$destip")
+    if [ -z "$nexthop" ]; then
+        echo "floodsd setup: no route to $destip out $iface — check routing/cabling before flooding."
+        return 1
+    fi
+    if [ "$nexthop" != "$destip" ]; then
+        echo "$destip is routed via $nexthop (not on-link) — resolving $nexthop's MAC; packets stay addressed (IP) to $destip."
+    fi
+
+    # A prior failed attempt can leave a FAILED/INCOMPLETE neighbor entry
+    # behind, which makes the kernel back off re-ARPing it for a while —
+    # silently turning "retry" into a no-op. Flushing first keeps retries real.
+    sudo ip neigh flush to "$nexthop" dev "$iface" >/dev/null 2>&1
+
+    echo "Probing $destip:$FLOOD_DPORT via $iface (UDP, src port $FLOOD_SPORT) to resolve $nexthop's MAC..."
     if ! _fd_udp_probe "$iface" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT"; then
         echo "floodsd setup: couldn't send a UDP probe to $destip:$FLOOD_DPORT from $iface — check routing/cabling before flooding."
         return 1
@@ -317,20 +516,44 @@ _floodsd_setup() {
 
     local destmac tries
     for tries in 1 2 3 4 5 6; do
-        destmac=$(ip neigh show "$destip" dev "$iface" 2>/dev/null | awk '/lladdr/{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}' | head -1)
+        destmac=$(ip neigh show "$nexthop" dev "$iface" 2>/dev/null | awk '/lladdr/{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}' | head -1)
         [ -n "$destmac" ] && break
         sleep 0.5
         _fd_udp_probe "$iface" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT" >/dev/null 2>&1
     done
     if [ -z "$destmac" ]; then
-        echo "floodsd setup: probe(s) sent but no ARP entry resolved for $destip on $iface — check routing/cabling before flooding."
+        echo "floodsd setup: probe(s) sent but no ARP entry resolved for $nexthop on $iface — check routing/cabling before flooding."
+        _fd_diagnose_probe "$iface" "$destip" "$FLOOD_DPORT" "$FLOOD_SPORT" "$nexthop"
         return 1
     fi
 
     _floodsd_set if "$iface"
     _floodsd_set destip "$destip"
     _floodsd_set destmac "$destmac"
-    echo "Target confirmed: $destip ($destmac) reachable via $iface."
+    echo "Target confirmed: $destip via $nexthop ($destmac) reachable via $iface."
+}
+
+# floodsd setup-srcport: override the UDP source port the probe, kernel
+# pktgen, and DPDK pktgen all egress from (default: 8424). Needed when this
+# box's egress firewall pins outbound traffic to a source port other than
+# the default — that port is whatever the box's owner/network team
+# allowlisted, so ask them, or find it by testing: `sudo tcpdump -ni <iface>
+# udp` while sending traffic from candidate ports shows whether packets
+# actually leave the NIC. Persisted like the rest of the target state, so it
+# survives across setup/dpdk/kernel invocations; re-run `floodsd setup`
+# afterward to re-probe with the new port.
+_floodsd_setup_srcport() {
+    local cur port
+    cur=$(_floodsd_get sport); cur=${cur:-$FLOOD_SPORT}
+    read -rp "UDP source port to egress from (Enter = keep '$cur'): " port
+    port=${port:-$cur}
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo "floodsd setup-srcport: invalid port '$port'."
+        return 1
+    fi
+    _floodsd_set sport "$port"
+    FLOOD_SPORT=$port
+    echo "Source port set to $port. Re-run 'floodsd setup' to re-probe with the new port."
 }
 
 # _fd_ensure_pktgen_module: modprobe the in-kernel pktgen module, installing
@@ -747,6 +970,16 @@ _floodsd_dpdk() {
         return 1
     fi
 
+    if [ -d "/sys/class/net/$iface/bonding" ]; then
+        local slaves; slaves=$(cat "/sys/class/net/$iface/bonding/slaves" 2>/dev/null)
+        echo "floodsd dpdk: '$iface' is a bonding master — it has no PCI device, so DPDK can't bind it directly."
+        echo "  Either run 'floodsd kernel' instead (kernel pktgen rides a bond transparently), or"
+        echo "  re-run 'floodsd setup' and pick one of its slaves${slaves:+ ($slaves)} to flood a single raw link."
+        return 1
+    fi
+
+    _fd_bond_detach "$iface"
+
     local pci nicnode curdrv ifip
     pci=$(basename "$(readlink -f /sys/class/net/$iface/device)")
     nicnode=$(cat /sys/class/net/$iface/device/numa_node 2>/dev/null)
@@ -789,19 +1022,88 @@ EOF
     sudo env LD_LIBRARY_PATH="$PKTGEN_PREFIX/lib" "$PKTGEN_BIN" -l "$lcores" -n 4 -a "$pci" --main-lcore "$main" -- -m "$map" -f "$cmds"
 }
 
-# floodsd restore: undo a vfio-pci bind from `floodsd dpdk` — rebind the NIC
-# to its kernel driver and rename the reborn netdev back to its original name.
-_floodsd_restore() { _fd_vfio_restore "floodsd restore" "$FLOODSD_VFIO_STATE"; }
+# floodsd restore: undo whatever `floodsd dpdk` did to hand the NIC over —
+# rebind vfio-pci NICs to their kernel driver (see _fd_vfio_restore), and/or
+# re-add the NIC to its bond if _fd_bond_detach pulled it out of one
+# (Mellanox NICs skip the vfio-pci step entirely, so for those this bond
+# reattach is the only restore step there is).
+_floodsd_restore() {
+    local any=0
+    [ -f "$FLOODSD_VFIO_STATE" ] && { _fd_vfio_restore "floodsd restore" "$FLOODSD_VFIO_STATE" && any=1; }
+    [ -f "$FLOODSD_BOND_STATE" ] && { _fd_bond_reattach && any=1; }
+    if [ "$any" = 0 ]; then
+        echo "floodsd restore: nothing to restore (no vfio-pci bind or bond detach recorded)."
+        return 1
+    fi
+    return 0
+}
+
+# floodsd diagnose: read-only health check for a saved (or in-progress)
+# target — link state, IP config, resolved next hop + live neighbor entry,
+# rp_filter, python3 presence, and a best-effort grep of local firewall
+# rules for the configured source port. Entirely opt-in — nothing else in
+# floodsd calls this, so it never adds noise unless you run it yourself.
+_floodsd_diagnose() {
+    local iface destip destmac sport
+    iface=$(_floodsd_get if); destip=$(_floodsd_get destip); destmac=$(_floodsd_get destmac)
+    sport=$(_floodsd_get sport); sport=${sport:-$FLOOD_SPORT}
+
+    echo "== floodsd diagnose =="
+    echo "Source port: $sport (dport $FLOOD_DPORT)"
+    command -v python3 >/dev/null 2>&1 || echo "  WARNING: python3 not found — 'floodsd setup' probes need it."
+
+    if [ -z "$iface" ]; then
+        echo "No target configured yet — run 'floodsd setup' first for interface-specific checks."
+        return 0
+    fi
+
+    echo
+    echo "Interface: $iface"
+    if ! ip link show "$iface" >/dev/null 2>&1; then
+        echo "  NOT FOUND — was it rebound to vfio-pci, or pulled into/out of a bond? Check 'floodsd restore'."
+        return 1
+    fi
+    local state; state=$(cat "/sys/class/net/$iface/operstate" 2>/dev/null)
+    echo "  operstate: ${state:-unknown}$( [ "$state" != up ] && echo '  <-- not up' )"
+    ip -4 -o addr show dev "$iface" | awk '{print "  addr: "$4}'
+    local bondtag; bondtag=$(_fd_bond_tag "$iface")
+    [ -n "$bondtag" ] && echo "  $bondtag"
+
+    local rpall rpif
+    rpall=$(cat /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null)
+    rpif=$(cat "/proc/sys/net/ipv4/conf/$iface/rp_filter" 2>/dev/null)
+    echo "  rp_filter: all=${rpall:-?} $iface=${rpif:-?}$( [ "${rpif:-0}" = 1 ] && echo '  <-- strict mode; asymmetric-routed replies may get dropped' )"
+
+    if [ -n "$destip" ]; then
+        echo
+        echo "Target: $destip (saved MAC: ${destmac:-none})"
+        local nexthop; nexthop=$(_fd_nexthop_ip "$iface" "$destip")
+        if [ -z "$nexthop" ]; then
+            echo "  no route to $destip out $iface"
+        else
+            [ "$nexthop" != "$destip" ] && echo "  routed via $nexthop (not on-link)" || echo "  on-link"
+            local live; live=$(ip neigh show "$nexthop" dev "$iface" 2>/dev/null)
+            echo "  neighbor entry: ${live:-none}"
+        fi
+    fi
+
+    if command -v iptables >/dev/null 2>&1; then
+        local hits; hits=$(sudo iptables -S OUTPUT 2>/dev/null | grep -c -- "$sport")
+        [ "${hits:-0}" -gt 0 ] && echo "  NOTE: iptables OUTPUT has $hits rule(s) mentioning '$sport' (may be coincidental — verify it ACCEPTs this traffic)"
+    fi
+}
 
 floodsd() {
     case "${1:-}" in
-        setup)   shift; _floodsd_setup "$@";   return ;;
-        dpdk)    shift; _floodsd_dpdk "$@";    return ;;
-        kernel)  shift; _floodsd_kernel "$@";  return ;;
-        stop)    shift; _floodsd_stop "$@";    return ;;
-        restore) shift; _floodsd_restore "$@"; return ;;
+        setup)         shift; _floodsd_setup "$@";         return ;;
+        setup-srcport) shift; _floodsd_setup_srcport "$@"; return ;;
+        diagnose)      shift; _floodsd_diagnose "$@";      return ;;
+        dpdk)          shift; _floodsd_dpdk "$@";          return ;;
+        kernel)        shift; _floodsd_kernel "$@";        return ;;
+        stop)          shift; _floodsd_stop "$@";          return ;;
+        restore)       shift; _floodsd_restore "$@";       return ;;
         *)
-            echo "Usage: floodsd setup | dpdk | kernel | stop | restore"
+            echo "Usage: floodsd setup | setup-srcport | diagnose | dpdk | kernel | stop | restore"
             return 1
             ;;
     esac
