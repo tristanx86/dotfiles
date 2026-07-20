@@ -6,8 +6,23 @@
 # stored per-device in an untracked file (defaults to firedancer-dev).
 FD_BIN_FILE="$HOME/.config/dotfiles/fdbin"
 _fdbin() { cat "$FD_BIN_FILE" 2>/dev/null || echo firedancer-dev; }
-# Resolve binary to absolute path so sudo can find it regardless of secure_path (needed on RHEL/Fedora).
-_fdbinpath() { command -v "$(_fdbin)" || _fdbin; }
+# Resolve binary to absolute path so sudo can find it regardless of secure_path
+# (needed on RHEL/Fedora). Falls back to the repo's own build output
+# (build/<target>/<compiler>/bin/<name>, e.g. build/native/gcc/bin/firedancer-dev)
+# when the binary isn't on PATH — some distros (Rocky et al.) don't get that
+# directory on PATH any other way, which otherwise means manually symlinking
+# the binary somewhere on PATH before every fd command works.
+_fdbinpath() {
+    local name; name=$(_fdbin)
+    local found; found=$(command -v "$name" 2>/dev/null)
+    [ -n "$found" ] && { echo "$found"; return; }
+    local candidates=(build/*/*/bin/$name(N.Om[1]))
+    if [ ${#candidates} -ge 1 ]; then
+        echo "$PWD/${candidates[1]}"
+        return
+    fi
+    echo "$name"
+}
 # Make target(s) for the current binary. fddev also needs the solana target.
 _fdtarget() { case "$(_fdbin)" in fddev) echo "fddev solana";; *) echo "$(_fdbin)";; esac; }
 
